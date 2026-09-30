@@ -445,7 +445,7 @@
     html += '<div><div class="cab-bloque"><h2 class="titulo-bloque">Cuentas</h2><span class="sub num">Tienes ' + Q(saldos.reduce(function (a, b) { return a + b; }, 0)) + '</span></div>' +
       (cuentas.length ? cuentas.map(function (c, i) {
         return '<button type="button" class="banco" data-cuenta="' + esc(c.id) + '">' + muestra(c.color, true) + '<span class="item-txt"><span class="item-nombre">' + esc(c.nombre) + '</span><span class="item-meta">' + esc(c.banco) + '</span></span>' +
-          '<span class="banco-valor num">' + Q(saldos[i]) + '<small>saldo</small></span></button>';
+          '<span class="banco-valor num' + (saldos[i] < 0 ? ' negativo' : '') + '">' + Q(saldos[i]) + '<small>saldo</small></span></button>';
       }).join('') : '<p class="vacio">Todavía no tienes cuentas. Agrega la primera.</p>') +
       '<div class="fila-btns"><button type="button" class="btn" id="b-ingreso"' + (cuentas.length ? '' : ' disabled') + '>Ingreso</button><button type="button" class="btn" id="b-retiro"' + (cuentas.length ? '' : ' disabled') + '>Retiro</button><button type="button" class="btn" id="b-nueva-c">Agregar cuenta</button></div></div>';
     var movs = d.pagos.map(function (p) { return { f: p.fecha, p: p }; })
@@ -507,7 +507,7 @@
       '<label class="campo"><span>Descripción</span><input id="mv-d" placeholder="' + (esR ? 'Cajero, efectivo, transferencia…' : 'Salario, bono 14, venta…') + '"></label>' +
       '<div class="dos"><label class="campo"><span>Monto</span><input id="mv-m" inputmode="decimal" placeholder="0.00"></label>' +
       '<label class="campo"><span>Fecha</span><input id="mv-f" type="date" value="' + hoy() + '"></label></div>' +
-      (esR ? '<p class="nota">Un retiro baja el saldo de la cuenta. No cuenta como gasto: anota aparte en qué usas el efectivo.</p>' : '') +
+      (esR ? '<p class="nota">Un retiro baja el saldo de la cuenta y puede dejarla en negativo. No cuenta como gasto: anota aparte en qué usas el efectivo.</p>' : '') +
       '<p class="error" id="mv-err" hidden></p><button class="btn btn-principal" type="submit">Registrar ' + (esR ? 'retiro' : 'ingreso') + '</button></form>';
     abrirHoja(esR ? 'Registrar retiro' : 'Registrar ingreso', html, function (root) {
       $('#f-mov', root).addEventListener('submit', function (e) {
@@ -537,7 +537,7 @@
   }
   function abrirCuenta(id) {
     var c = C.buscar(S.data.cuentas, id);
-    var html = '<div class="cifra"><span class="eyebrow">Saldo' + (c.banco ? ' · ' + esc(c.banco) : '') + '</span><span class="cifra-valor num">' + Q(C.saldoCuenta(S.data, id)) + '</span></div>' +
+    var html = '<div class="cifra"><span class="eyebrow">Saldo' + (c.banco ? ' · ' + esc(c.banco) : '') + '</span><span class="cifra-valor num' + (C.saldoCuenta(S.data, id) < 0 ? ' negativo' : '') + '">' + Q(C.saldoCuenta(S.data, id)) + '</span></div>' +
       '<div class="fila-btns"><button type="button" class="btn btn-principal" id="c-ing">Ingreso</button><button type="button" class="btn btn-principal" id="c-ret">Retiro</button></div>' +
       '<button type="button" class="btn" id="c-editar">Editar o quitar</button>';
     abrirHoja(c.nombre, html, function (root) {

@@ -327,3 +327,4 @@ button.alerta { border: 0; text-align: left; font: inherit; font-size: var(--t-s
 .hoja-cuerpo .fila-btns, .form .fila-btns, .resultado .fila-btns { margin-top: 0; }
 .btn[disabled] { opacity: .45; }
 .fila-btns .btn { flex: 1 1 0; padding-inline: 10px; font-size: .9375rem; }
+.negativo { color: var(--pasado); }

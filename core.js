@@ -472,7 +472,7 @@ var Core = (function () {
       var fecha = a.fecha || ctx.hoy; if (!fechaValida(fecha)) return err('La fecha no es válida.');
       var id = a.id || nuevoId(ctx, tabla === 'retiros' ? 'r' : 'i');
       if (buscar(data[tabla], id)) return dup();
-      if (tabla === 'retiros') { var s = saldoCuenta(data, c.id); if (v.c > s) return err(c.nombre + ' tiene ' + fmtQ(s) + '. No alcanza para retirar ' + fmtQ(v.c) + '.'); }
+      // Los retiros se permiten aunque no haya saldo: la cuenta puede quedar en negativo.
       return okOps([{ op: 'add', tabla: tabla, row: { id: id, fecha: fecha, cuenta: c.id,
         descripcion: String(a.descripcion || '').trim() || (tabla === 'retiros' ? 'Retiro' : 'Ingreso'), monto: v.c, ejemplo: !!ctx.ejemplo } }]);
     };
