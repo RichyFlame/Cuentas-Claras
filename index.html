@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="es-GT">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Cuentas Claras</title>
+<meta name="description" content="Registro de gastos, presupuesto y cuentas compartidas en quetzales.">
+<meta name="theme-color" content="#F3F5F2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0F1412" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Cuentas">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,650&family=Hanken+Grotesk:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="marca"><span class="marca-q">Q</span>Cuentas Claras</div>
+  <button class="estado" id="estado" type="button">—</button>
+</header>
+
+<main id="app">
+  <!-- ANOTAR -->
+  <section class="vista" id="v-anotar" data-vista="anotar">
+    <div id="atajo-banner" hidden></div>
+
+    <form id="f-gasto" class="anotar" autocomplete="off" novalidate>
+      <label class="eyebrow" for="g-monto">Monto</label>
+      <div class="monto">
+        <span class="monto-q" aria-hidden="true">Q</span>
+        <input id="g-monto" name="monto" inputmode="decimal" placeholder="0.00" enterkeyhint="next" aria-label="Monto en quetzales">
+      </div>
+      <input id="g-nombre" class="campo-nombre" name="nombre" placeholder="¿En qué fue? Ej.: almuerzo" enterkeyhint="done" aria-label="Descripción">
+      <p class="pista" id="g-pista">&nbsp;</p>
+
+      <div class="chips" id="g-medios" role="radiogroup" aria-label="Tarjeta o cuenta"></div>
+
+      <div class="opciones">
+        <button type="button" class="opcion" id="g-para"><span class="opcion-lbl">Para</span><span id="g-para-txt">Solo mío</span></button>
+        <label class="opcion" for="g-fecha"><span class="opcion-lbl">Fecha</span><span id="g-fecha-txt">Hoy</span>
+          <input type="date" id="g-fecha" class="fecha-oculta"></label>
+      </div>
+
+      <p class="error" id="g-error" role="alert" hidden></p>
+      <button class="btn btn-principal" id="g-enviar" type="submit">Anotar</button>
+    </form>
+
+    <div id="g-resultado" aria-live="polite"></div>
+
+    <div class="bloque">
+      <h2 class="titulo-bloque">Últimos gastos</h2>
+      <ul class="lista" id="g-ultimos"></ul>
+    </div>
+  </section>
+
+  <!-- MES -->
+  <section class="vista" id="v-mes" data-vista="mes" hidden>
+    <nav class="mesnav" aria-label="Mes">
+      <button type="button" class="mesnav-btn" data-mes="-1" aria-label="Mes anterior">‹</button>
+      <span class="mesnav-txt" data-mes-txt></span>
+      <button type="button" class="mesnav-btn" data-mes="1" aria-label="Mes siguiente">›</button>
+    </nav>
+    <div id="mes-cuerpo"></div>
+  </section>
+
+  <!-- PRESUPUESTO -->
+  <section class="vista" id="v-presupuesto" data-vista="presupuesto" hidden>
+    <nav class="mesnav" aria-label="Mes">
+      <button type="button" class="mesnav-btn" data-mes="-1" aria-label="Mes anterior">‹</button>
+      <span class="mesnav-txt" data-mes-txt></span>
+      <button type="button" class="mesnav-btn" data-mes="1" aria-label="Mes siguiente">›</button>
+    </nav>
+    <div id="pres-cuerpo"></div>
+  </section>
+
+  <!-- BANCOS -->
+  <section class="vista" id="v-bancos" data-vista="bancos" hidden>
+    <div id="bancos-cuerpo"></div>
+  </section>
+
+  <!-- MÁS -->
+  <section class="vista" id="v-mas" data-vista="mas" hidden>
+    <div class="segmentos" role="tablist" id="mas-seg">
+      <button type="button" role="tab" data-seg="cuotas" aria-selected="true">Cuotas</button>
+      <button type="button" role="tab" data-seg="personas" aria-selected="false">Personas</button>
+      <button type="button" role="tab" data-seg="ajustes" aria-selected="false">Ajustes</button>
+    </div>
+    <div id="mas-cuerpo"></div>
+  </section>
+</main>
+
+<nav class="tabs" aria-label="Secciones">
+  <button type="button" data-tab="anotar" aria-current="page">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>Anotar</span></button>
+  <button type="button" data-tab="mes">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></svg><span>Mes</span></button>
+  <button type="button" data-tab="presupuesto">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19V9M12 19V5M19 19v-7"/></svg><span>Presupuesto</span></button>
+  <button type="button" data-tab="bancos">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/></svg><span>Bancos</span></button>
+  <button type="button" data-tab="mas">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="18" cy="12" r="1.2"/></svg><span>Más</span></button>
+</nav>
+
+<div class="velo" id="velo" hidden></div>
+<div class="hoja" id="hoja" role="dialog" aria-modal="true" aria-labelledby="hoja-titulo" hidden>
+  <div class="hoja-cab">
+    <h2 id="hoja-titulo"></h2>
+    <button type="button" class="hoja-cerrar" id="hoja-cerrar" aria-label="Cerrar">Cerrar</button>
+  </div>
+  <div class="hoja-cuerpo" id="hoja-cuerpo"></div>
+</div>
+
+<div class="aviso" id="aviso" role="status" hidden></div>
+
+<!-- Conexión (primera vez) -->
+<div class="bienvenida" id="bienvenida" hidden>
+  <div class="bienvenida-in">
+    <div class="marca grande"><span class="marca-q">Q</span>Cuentas Claras</div>
+    <p class="bienvenida-txt">Conecta tu hoja de Google Sheets para guardar tus gastos. Encuentras la dirección y la clave al publicar el Apps Script.</p>
+    <form id="f-conexion" class="form" novalidate>
+      <label class="campo"><span>Dirección de la API</span>
+        <input id="cx-url" type="url" placeholder="https://script.google.com/macros/s/…/exec" autocapitalize="off" autocorrect="off"></label>
+      <label class="campo"><span>Clave secreta</span>
+        <input id="cx-clave" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+      <p class="error" id="cx-error" role="alert" hidden></p>
+      <button class="btn btn-principal" type="submit" id="cx-enviar">Conectar</button>
+      <button class="btn btn-texto" type="button" id="cx-local">Probar sin conexión, con datos de ejemplo</button>
+    </form>
+  </div>
+</div>
+
+<script src="core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
