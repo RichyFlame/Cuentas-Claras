@@ -1,6 +1,6 @@
 /* Guarda la app para que abra aunque no haya señal. Sube VERSION al publicar cambios. */
-var VERSION = 'cc-v1';
-var ARCHIVOS = ['./', './index.html', './styles.css', './core.js', './app.js', './manifest.webmanifest',
+var VERSION = 'cc-v2';
+var ARCHIVOS = ['./', './index.html', './styles.css?v=2', './core.js?v=2', './app.js?v=2', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 self.addEventListener('install', function (e) {
   e.waitUntil(caches.open(VERSION).then(function (c) { return c.addAll(ARCHIVOS); }).then(function () { return self.skipWaiting(); }));

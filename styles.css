@@ -301,3 +301,29 @@ button.item { width: 100%; text-align: left; background: none; border-width: 0 0
 /* ---------- Banner del atajo ---------- */
 .atajo { display: grid; gap: 8px; padding: 14px 16px; border-radius: var(--r); background: var(--superficie); border: 1px solid var(--linea); }
 .atajo .item { padding: 8px 0; }
+
+/* ---------- v2 ---------- */
+.top-der { display: flex; align-items: center; gap: 4px; }
+.icono { border: 0; background: none; width: 40px; height: 40px; display: grid; place-items: center; color: var(--tenue); border-radius: 50%; }
+.icono svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.selector {
+  display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-radius: var(--r);
+  border: 1px solid var(--linea); background: var(--superficie); min-width: 0;
+}
+.selector-txt { display: grid; flex: 1; min-width: 0; }
+.selector select {
+  width: 100%; min-width: 0; border: 0; background: none; padding: 2px 0; font-size: 16px; font-weight: 500;
+  -webkit-appearance: none; appearance: none; outline: none; color: var(--tinta);
+  background-image: linear-gradient(45deg, transparent 50%, var(--tenue) 50%), linear-gradient(135deg, var(--tenue) 50%, transparent 50%);
+  background-position: calc(100% - 7px) 55%, calc(100% - 2px) 55%; background-size: 5px 5px; background-repeat: no-repeat; padding-right: 20px;
+}
+.bloque-mes { display: grid; gap: 12px; }
+.cats { margin-top: 8px; }
+.segmentos { margin-top: 0; }
+.avisos { display: grid; gap: 8px; }
+button.alerta { border: 0; text-align: left; font: inherit; font-size: var(--t-s); color: var(--tinta); width: 100%; }
+.alerta.suave { background: var(--acento-suave); margin: 0; }
+.fila-btns { margin-top: 12px; }
+.hoja-cuerpo .fila-btns, .form .fila-btns, .resultado .fila-btns { margin-top: 0; }
+.btn[disabled] { opacity: .45; }
+.fila-btns .btn { flex: 1 1 0; padding-inline: 10px; font-size: .9375rem; }
