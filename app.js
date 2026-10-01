@@ -31,10 +31,37 @@
   function activos(lista) { return (lista || []).filter(C.activo); }
 
   /* ---------- Conexión con Apps Script ---------- */
+  // Primero intenta con fetch (POST). Algunos navegadores (por ejemplo Safari en Mac con ciertas
+  // opciones de privacidad o bloqueadores) cortan esa respuesta; entonces usa JSONP (GET con <script>),
+  // que no depende de CORS. Si JSONP funciona, lo recuerda para las próximas veces.
   function api(body) {
     var payload = JSON.stringify(Object.assign({ clave: S.cfg.clave }, body));
+    if (S.cfg.via === 'jsonp') return jsonp(payload);
     return fetch(S.cfg.url, { method: 'POST', body: payload, redirect: 'follow' })
-      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .catch(function (e) {
+        return jsonp(payload).then(function (res) {
+          S.cfg.via = 'jsonp'; if (S.cfg.modo === 'remoto' && LS.get('cfg', null)) LS.set('cfg', S.cfg);
+          return res;
+        }, function () { throw e; });
+      });
+  }
+  function jsonp(payload) {
+    return new Promise(function (ok, mal) {
+      var cb = 'ccRespuesta' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+      var s = document.createElement('script'), listo = false;
+      var t = setTimeout(function () { fin(new Error('tiempo agotado')); }, 25000);
+      function fin(err, val) {
+        if (listo) return; listo = true; clearTimeout(t);
+        try { delete window[cb]; } catch (x) { window[cb] = undefined; }
+        if (s.parentNode) s.parentNode.removeChild(s);
+        if (err) mal(err); else ok(val);
+      }
+      window[cb] = function (v) { fin(null, v); };
+      s.onerror = function () { fin(new Error('no cargó')); };
+      s.src = S.cfg.url + (S.cfg.url.indexOf('?') < 0 ? '?' : '&') + 'callback=' + cb + '&q=' + encodeURIComponent(payload);
+      document.head.appendChild(s);
+    });
   }
   function esLocal() { return S.cfg && S.cfg.modo === 'local'; }
   function guardarCache() { LS.set(esLocal() ? 'local' : 'cache', S.data); }
@@ -292,47 +319,76 @@
       '<span class="etiqueta">' + muestra(m.color) + esc(m.nombre) + '</span>' +
       (extra ? '<span class="etiqueta">' + esc(extra) + (mio ? ' · tuyo ' + Q(mio) : '') + '</span>' : '') + '</div>' +
       alertaPresupuesto(g.categoria, C.mesContable(S.data, g.medio, g.fecha), antes) +
-      '<div class="fila-btns"><button type="button" class="btn btn-chico" data-gasto="' + esc(g.id) + '">Cambiar clasificación</button></div></div>';
+      '<div class="fila-btns"><button type="button" class="btn btn-chico" data-gasto="' + esc(g.id) + '">Editar gasto</button></div></div>';
   }
 
-  /* ----- Hoja: reclasificar / borrar un gasto ----- */
+  /* ----- Hoja: editar / borrar un gasto ----- */
+  // Editar todo un gasto: monto, descripción, fecha, tarjeta o cuenta, para quién es, categoría y tipo.
   function abrirGasto(id) {
     var g = C.buscar(S.data.gastos, id); if (!g) return;
-    var m = medioDe(g.medio), cat = g.categoria, tipo = g.tipo;
-    var partes = g.partes.map(function (x) { return '<li class="item"><span></span><span class="item-txt"><span class="item-nombre">' + esc(personaTxt(x.p)) + '</span></span><span class="item-monto num">' + Q(x.m) + '</span></li>'; }).join('');
-    var html = '<div class="cifra"><span class="eyebrow">' + esc(fechaTxt(g.fecha)) + ' · cuenta en ' + esc(C.nombreMes(C.mesContable(S.data, g.medio, g.fecha))) + '</span>' +
-      '<span class="cifra-valor num">' + Q(g.monto) + '</span><span class="etiquetas"><span class="etiqueta">' + muestra(m.color) + esc(m.nombre) + '</span></span></div>' +
-      (describirPartes(g.partes) ? '<div><span class="eyebrow">Reparto</span><ul class="lista">' + partes + '</ul></div>' : '') +
-      '<div><span class="eyebrow">Categoría</span><div class="cats" id="eg-cats">' +
-      C.CATEGORIAS.map(function (c) { return '<button type="button" class="chip" data-cat="' + esc(c) + '" aria-pressed="' + (c === cat) + '">' + esc(c) + '</button>'; }).join('') + '</div></div>' +
-      '<div><span class="eyebrow">Tipo</span><div class="segmentos" id="eg-tipo">' +
-      C.TIPOS.map(function (t) { return '<button type="button" data-tipo="' + t + '" aria-pressed="' + (t === tipo) + '">' + t + '</button>'; }).join('') + '</div></div>' +
-      '<p class="nota">Al guardar, la próxima vez que escribas “' + esc(C.palabraParaRegla(g.nombre)) + '” se clasificará igual.</p>' +
-      '<button type="button" class="btn btn-principal" id="eg-guardar">Guardar clasificación</button>' +
-      '<button type="button" class="btn btn-peligro" id="eg-borrar">Borrar gasto</button>';
-    abrirHoja(g.nombre, html, function (root) {
+    var d = S.data, enGasto = g.partes.map(function (x) { return x.p; });
+    var est = { monto: C.decimal(g.monto), nombre: g.nombre, fecha: g.fecha, medio: g.medio, cat: g.categoria, tipo: g.tipo, reparto: repartoDesdePartes(g.partes, g.monto) };
+    var titulo = 'Editar gasto';
+    function listaMedios() {
+      var t = d.tarjetas.filter(function (x) { return C.activo(x) || x.id === g.medio; }), c = d.cuentas.filter(function (x) { return C.activo(x) || x.id === g.medio; });
+      return (t.length ? '<optgroup label="Tarjetas">' + opciones(t, est.medio, function (x) { return x.nombre; }) + '</optgroup>' : '') +
+        (c.length ? '<optgroup label="Cuentas">' + opciones(c, est.medio, function (x) { return x.nombre; }) + '</optgroup>' : '');
+    }
+    function html() {
+      return '<form class="form" id="f-eg" novalidate>' +
+        '<div class="dos"><label class="campo"><span>Monto</span><input id="eg-m" inputmode="decimal" value="' + esc(est.monto) + '"></label>' +
+        '<label class="campo"><span>Fecha</span><input id="eg-f" type="date" value="' + esc(est.fecha) + '"></label></div>' +
+        '<label class="campo"><span>¿En qué fue?</span><input id="eg-n" value="' + esc(est.nombre) + '"></label>' +
+        '<label class="campo"><span>Tarjeta o cuenta</span><select id="eg-medio">' + listaMedios() + '</select></label>' +
+        '<button type="button" class="opcion" id="eg-para"><span class="opcion-lbl">Para</span><span>' + esc(textoPara(est.reparto)) + '</span></button>' +
+        '<div><span class="eyebrow">Categoría</span><div class="cats" id="eg-cats">' +
+        C.CATEGORIAS.map(function (c) { return '<button type="button" class="chip" data-cat="' + esc(c) + '" aria-pressed="' + (c === est.cat) + '">' + esc(c) + '</button>'; }).join('') + '</div></div>' +
+        '<div><span class="eyebrow">Tipo</span><div class="segmentos" id="eg-tipo">' +
+        C.TIPOS.map(function (t) { return '<button type="button" data-tipo="' + t + '" aria-pressed="' + (t === est.tipo) + '">' + t + '</button>'; }).join('') + '</div></div>' +
+        '<p class="nota">Si cambias la categoría, la próxima vez que escribas lo mismo se clasificará igual.' + (g.origen === 'atajo' ? ' Este gasto llegó desde el atajo.' : '') + '</p>' +
+        '<p class="error" id="eg-err" hidden></p>' +
+        '<button type="submit" class="btn btn-principal" id="eg-guardar">Guardar cambios</button>' +
+        '<button type="button" class="btn btn-peligro" id="eg-borrar">Borrar gasto</button></form>';
+    }
+    function leer(root) {
+      est.monto = $('#eg-m', root).value; est.fecha = $('#eg-f', root).value; est.nombre = $('#eg-n', root).value; est.medio = $('#eg-medio', root).value;
+    }
+    function montar(root) {
       function marcar() {
-        $$('#eg-cats .chip', root).forEach(function (x) { x.setAttribute('aria-pressed', x.dataset.cat === cat); });
-        $$('#eg-tipo button', root).forEach(function (x) { x.setAttribute('aria-pressed', x.dataset.tipo === tipo); });
+        $$('#eg-cats .chip', root).forEach(function (x) { x.setAttribute('aria-pressed', x.dataset.cat === est.cat); });
+        $$('#eg-tipo button', root).forEach(function (x) { x.setAttribute('aria-pressed', x.dataset.tipo === est.tipo); });
       }
       root.onclick = function (e) {
         var b = e.target.closest('button'); if (!b) return;
-        if (b.dataset.cat) { cat = b.dataset.cat; tipo = C.TIPO_POR_CATEGORIA[cat]; marcar(); }
-        if (b.dataset.tipo) { tipo = b.dataset.tipo; marcar(); }
-        if (b.id === 'eg-guardar') {
-          var r = ejecutar({ tipo: 'reclasificar', id: g.id, categoria: cat, tipoGasto: tipo });
-          if (!r.ok) return aviso(r.error);
-          cerrarHoja(); aviso('Guardado. Aprendí la regla para “' + (r.info.palabra || g.nombre) + '”.');
-          if ($('#g-resultado [data-gasto="' + g.id + '"]')) mostrarResultado(C.buscar(S.data.gastos, g.id));
-          render();
+        if (b.dataset.cat) { est.cat = b.dataset.cat; est.tipo = C.TIPO_POR_CATEGORIA[est.cat]; marcar(); }
+        if (b.dataset.tipo) { est.tipo = b.dataset.tipo; marcar(); }
+        if (b.id === 'eg-para') {
+          leer(root);
+          abrirReparto({ estado: est.reparto, total: function () { return C.parseMonto(est.monto); },
+            personas: function () {
+              var lista = C.personasDelMes(d, C.mesContable(d, est.medio, est.fecha));
+              return lista.concat(d.personas.filter(function (p) { return enGasto.indexOf(p.id) >= 0 && lista.indexOf(p) < 0; }));
+            },
+            alCerrar: function () { setTimeout(function () { abrirHoja(titulo, html(), montar); }, 0); } });
         }
       };
+      $('#f-eg', root).addEventListener('submit', function (e) {
+        e.preventDefault(); leer(root);
+        var total = C.parseMonto(est.monto), partes;
+        if (total !== null && total > 0) { var pr = partesDe(est.reparto, total); if (pr.error) return errorEn(root, '#eg-err', pr.error); partes = pr.partes; }
+        var r = ejecutar({ tipo: 'editarGasto', id: g.id, nombre: est.nombre, monto: est.monto, fecha: est.fecha, medio: est.medio, categoria: est.cat, tipoGasto: est.tipo, partes: partes });
+        if (!r.ok) return errorEn(root, '#eg-err', r.error);
+        cerrarHoja(); aviso('Gasto actualizado');
+        if ($('#g-resultado [data-gasto="' + g.id + '"]')) mostrarResultado(C.buscar(S.data.gastos, g.id));
+        render();
+      });
       dobleToque($('#eg-borrar', root), 'Toca otra vez para borrar', function () {
         ejecutar({ tipo: 'borrarGasto', id: g.id }); cerrarHoja(); aviso('Gasto borrado');
         if ($('#g-resultado [data-gasto="' + g.id + '"]')) $('#g-resultado').innerHTML = '';
         render();
       });
-    });
+    }
+    abrirHoja(titulo, html(), montar);
   }
 
   /* =====================================================================
@@ -394,10 +450,7 @@
       }
     });
     abrirHoja('Movimientos de ' + C.nombreMes(r.mes), h + (dia ? '</ul>' : ''), function (root) {
-      root.onclick = function (e) {
-        var b = e.target.closest('[data-gasto],[data-cuota]'); if (!b) return;
-        if (b.dataset.gasto) abrirGasto(b.dataset.gasto); else abrirCuota(b.dataset.cuota);
-      };
+      clicsLista(root);
     });
   }
   function abrirCategoriasSinLimite() {
@@ -426,6 +479,46 @@
   /* =====================================================================
      BANCOS
      ===================================================================== */
+  // Un renglón de pago, ingreso, retiro o transferencia. Al tocarlo se edita.
+  // `cuentaRef`: si se ve desde una cuenta, el signo dice si el dinero entró (+) o salió (−).
+  function itemMov(tabla, x, cuentaRef) {
+    var abre = '<li><button type="button" class="item" data-mov="' + tabla + ':' + esc(x.id) + '">', nombre, meta, signo = '', color;
+    if (tabla === 'pagos') {
+      var t = medioDe(x.tarjeta), c = medioDe(x.cuenta); color = t.color;
+      nombre = 'Pago a ' + t.nombre; meta = 'Desde ' + c.nombre; signo = '−';
+    } else if (tabla === 'transferencias') {
+      var o = medioDe(x.origen), de = medioDe(x.destino); color = (cuentaRef === x.destino ? de : o).color;
+      nombre = x.descripcion || 'Transferencia'; meta = o.nombre + ' → ' + de.nombre;
+      signo = cuentaRef === x.origen ? '−' : (cuentaRef === x.destino ? '+' : '');
+    } else {
+      var cu = medioDe(x.cuenta); color = cu.color;
+      nombre = x.descripcion; meta = (tabla === 'retiros' ? 'Retiro · ' : 'Ingreso · ') + cu.nombre; signo = tabla === 'ingresos' ? '+' : '−';
+    }
+    return abre + muestra(color) + '<span class="item-txt"><span class="item-nombre">' + esc(nombre) + '</span><span class="item-meta">' + esc(meta) + ' · ' + esc(fechaTxt(x.fecha)) + '</span></span>' +
+      '<span class="item-monto num">' + signo + Q(x.monto) + '</span></button></li>';
+  }
+  function movimientosBanco(filtro) {
+    var d = S.data, out = [];
+    ['pagos', 'ingresos', 'retiros', 'transferencias'].forEach(function (t) {
+      (d[t] || []).forEach(function (x) { if (!filtro || filtro(t, x)) out.push({ t: t, x: x, f: x.fecha }); });
+    });
+    return out.sort(function (a, b) { return b.f.localeCompare(a.f); });
+  }
+  function abrirMov(tabla, id) {
+    if (tabla === 'pagos') abrirPago(null, id);
+    else if (tabla === 'ingresos') abrirMovCuenta('ingreso', null, id);
+    else if (tabla === 'retiros') abrirMovCuenta('retiro', null, id);
+    else if (tabla === 'transferencias') abrirTransferencia(null, id);
+  }
+  // Clics dentro de una hoja que muestra listas (gastos, cuotas y movimientos se pueden abrir para editar).
+  function clicsLista(root) {
+    root.onclick = function (e) {
+      var b = e.target.closest('[data-gasto],[data-cuota],[data-mov]'); if (!b) return;
+      if (b.dataset.gasto) abrirGasto(b.dataset.gasto);
+      else if (b.dataset.cuota) abrirCuota(b.dataset.cuota);
+      else { var p = b.dataset.mov.split(':'); abrirMov(p[0], p.slice(1).join(':')); }
+    };
+  }
   function renderBancos() {
     var d = S.data, h = hoy(), tarjetas = activos(d.tarjetas), cuentas = activos(d.cuentas);
     var recs = C.recordatorios(d, h);
@@ -433,12 +526,12 @@
       return '<button type="button" class="alerta' + (r.dias <= 1 ? ' pasado' : '') + '" data-pagar="' + esc(r.tarjeta) + '">' + esc(C.textoRecordatorio(r)) + '</button>';
     }).join('') + '</div>' : '';
     var deudas = tarjetas.map(function (t) { return C.estadoTarjeta(d, t.id, h); });
-    html += '<div><div class="cab-bloque"><h2 class="titulo-bloque">Tarjetas</h2><span class="sub num">Debes ' + Q(deudas.reduce(function (a, e) { return a + e.deuda; }, 0)) + '</span></div>' +
+    html += '<div><div class="cab-bloque"><h2 class="titulo-bloque">Tarjetas</h2><span class="sub num">Debes ' + Q(deudas.reduce(function (a, e) { return a + Math.max(0, e.deuda); }, 0)) + '</span></div>' +
       (tarjetas.length ? tarjetas.map(function (t, i) {
         var e = deudas[i];
         return '<button type="button" class="banco" data-tarjeta="' + esc(t.id) + '">' + muestra(t.color, true) + '<span class="item-txt"><span class="item-nombre">' + esc(t.nombre) + '</span>' +
           '<span class="item-meta">' + (e.conCorte ? 'Corte ' + t.corte + ' · pago ' + t.pago : 'Falta día de corte') + (e.conCorte && e.contado ? ' · contado ' + Q(e.contado) : '') + '</span></span>' +
-          '<span class="banco-valor num">' + Q(e.deuda) + '<small>deuda</small></span></button>';
+          '<span class="banco-valor num">' + Q(Math.abs(e.deuda)) + '<small>' + (e.deuda < 0 ? 'a tu favor' : 'deuda') + '</small></span></button>';
       }).join('') : '<p class="vacio">Todavía no tienes tarjetas. Agrega la primera.</p>') +
       '<div class="fila-btns"><button type="button" class="btn" id="b-pagar"' + (tarjetas.length ? '' : ' disabled') + '>Pagar tarjeta</button><button type="button" class="btn" id="b-nueva-t">Agregar tarjeta</button></div></div>';
     var saldos = cuentas.map(function (c) { return C.saldoCuenta(d, c.id); });
@@ -447,19 +540,11 @@
         return '<button type="button" class="banco" data-cuenta="' + esc(c.id) + '">' + muestra(c.color, true) + '<span class="item-txt"><span class="item-nombre">' + esc(c.nombre) + '</span><span class="item-meta">' + esc(c.banco) + '</span></span>' +
           '<span class="banco-valor num' + (saldos[i] < 0 ? ' negativo' : '') + '">' + Q(saldos[i]) + '<small>saldo</small></span></button>';
       }).join('') : '<p class="vacio">Todavía no tienes cuentas. Agrega la primera.</p>') +
-      '<div class="fila-btns"><button type="button" class="btn" id="b-ingreso"' + (cuentas.length ? '' : ' disabled') + '>Ingreso</button><button type="button" class="btn" id="b-retiro"' + (cuentas.length ? '' : ' disabled') + '>Retiro</button><button type="button" class="btn" id="b-nueva-c">Agregar cuenta</button></div></div>';
-    var movs = d.pagos.map(function (p) { return { f: p.fecha, p: p }; })
-      .concat(d.ingresos.map(function (i) { return { f: i.fecha, i: i }; }))
-      .concat(d.retiros.map(function (r) { return { f: r.fecha, r: r }; }))
-      .sort(function (a, b) { return b.f.localeCompare(a.f); }).slice(0, 15);
-    html += '<div><h2 class="titulo-bloque">Pagos, ingresos y retiros</h2><ul class="lista">' + (movs.length ? movs.map(function (x) {
-      if (x.p) {
-        var t = medioDe(x.p.tarjeta), c = medioDe(x.p.cuenta);
-        return '<li class="item">' + muestra(t.color) + '<span class="item-txt"><span class="item-nombre">Pago a ' + esc(t.nombre) + '</span><span class="item-meta">Desde ' + esc(c.nombre) + ' · ' + esc(fechaTxt(x.f)) + '</span></span><span class="item-monto num">' + Q(x.p.monto) + '</span></li>';
-      }
-      var mv = x.i || x.r, cu = medioDe(mv.cuenta);
-      return '<li class="item">' + muestra(cu.color) + '<span class="item-txt"><span class="item-nombre">' + esc(mv.descripcion) + '</span><span class="item-meta">' + (x.r ? 'Retiro · ' : '') + esc(cu.nombre) + ' · ' + esc(fechaTxt(x.f)) + '</span></span><span class="item-monto num">' + (x.i ? '+' : '−') + Q(mv.monto) + '</span></li>';
-    }).join('') : '<li class="vacio">Sin movimientos todavía.</li>') + '</ul></div>';
+      '<div class="fila-btns"><button type="button" class="btn" id="b-ingreso"' + (cuentas.length ? '' : ' disabled') + '>Ingreso</button><button type="button" class="btn" id="b-retiro"' + (cuentas.length ? '' : ' disabled') + '>Retiro</button></div>' +
+      '<div class="fila-btns"><button type="button" class="btn" id="b-transferir"' + (cuentas.length > 1 ? '' : ' disabled') + '>Transferencia</button><button type="button" class="btn" id="b-nueva-c">Agregar cuenta</button></div></div>';
+    var movs = movimientosBanco().slice(0, 20);
+    html += '<div><h2 class="titulo-bloque">Pagos, ingresos, retiros y transferencias</h2><p class="nota">Toca uno para editarlo o borrarlo.</p><ul class="lista">' +
+      (movs.length ? movs.map(function (m) { return itemMov(m.t, m.x); }).join('') : '<li class="vacio">Sin movimientos todavía.</li>') + '</ul></div>';
     $('#bancos-cuerpo').innerHTML = html;
   }
 
@@ -468,24 +553,31 @@
     if (e.contado > 0) return 'Pago de contado del corte del ' + C.diaMes(e.ultimoCorte) + ': ' + Q(e.contado) + '. Vence el ' + C.diaMes(e.pagoUltimo) + '.';
     return 'Ya cubriste el corte del ' + C.diaMes(e.ultimoCorte) + '. El próximo corte es el ' + C.diaMes(e.siguienteCorte) + ' y llevas ' + Q(e.contadoSiguiente) + '.';
   }
-  function abrirPago(tid) {
-    var d = S.data, h = hoy(), tarjetas = activos(d.tarjetas).concat(d.tarjetas.filter(function (t) { return !C.activo(t) && C.deudaTarjeta(d, t.id, h) > 0; }));
+  function abrirPago(tid, editId) {
+    var d = S.data, h = hoy(), pg = editId ? C.buscar(d.pagos, editId) : null;
+    if (pg) tid = pg.tarjeta;
+    var tarjetas = d.tarjetas.filter(function (t) { return C.activo(t) || C.deudaTarjeta(d, t.id, h) > 0 || t.id === tid; });
     if (!tid) { var rec = C.recordatorios(d, h)[0]; tid = rec ? rec.tarjeta : ((tarjetas.filter(function (t) { return C.estadoTarjeta(d, t.id, h).contado > 0; })[0] || tarjetas[0] || {}).id); }
+    var cuentas = d.cuentas.filter(function (c) { return C.activo(c) || (pg && c.id === pg.cuenta); });
     var html = '<form class="form" id="f-pago" novalidate>' +
       '<label class="campo"><span>Tarjeta</span><select id="pg-t">' + opciones(tarjetas, tid, function (t) { return t.nombre; }) + '</select></label>' +
       '<p class="alerta suave" id="pg-info"></p>' +
-      '<label class="campo"><span>Desde la cuenta</span><select id="pg-c">' + opciones(activos(d.cuentas), null, function (c) { return c.nombre + ' · ' + Q(C.saldoCuenta(d, c.id)); }) + '</select></label>' +
-      '<div class="dos"><label class="campo"><span>Monto</span><input id="pg-m" inputmode="decimal" placeholder="0.00"></label>' +
-      '<label class="campo"><span>Fecha</span><input id="pg-f" type="date" value="' + h + '"></label></div>' +
+      '<label class="campo"><span>Desde la cuenta</span><select id="pg-c">' + opciones(cuentas, pg ? pg.cuenta : null, function (c) { return c.nombre + ' · ' + Q(C.saldoCuenta(d, c.id)); }) + '</select></label>' +
+      '<div class="dos"><label class="campo"><span>Monto</span><input id="pg-m" inputmode="decimal" placeholder="0.00"' + (pg ? ' value="' + C.decimal(pg.monto) + '"' : '') + '></label>' +
+      '<label class="campo"><span>Fecha</span><input id="pg-f" type="date" value="' + (pg ? pg.fecha : h) + '"></label></div>' +
       '<div class="fila-btns"><button type="button" class="btn btn-chico" id="pg-contado"></button><button type="button" class="btn btn-chico" id="pg-todo"></button></div>' +
       '<p class="nota">El pago baja la deuda de la tarjeta y el saldo de la cuenta por el mismo monto. No cuenta como gasto.</p>' +
-      '<p class="error" id="pg-err" hidden></p><button class="btn btn-principal" type="submit">Registrar pago</button></form>';
-    abrirHoja('Pagar tarjeta', html, function (root) {
+      '<p class="error" id="pg-err" hidden></p><button class="btn btn-principal" type="submit">' + (pg ? 'Guardar cambios' : 'Registrar pago') + '</button>' +
+      (pg ? '<button class="btn btn-peligro" type="button" id="pg-borrar">Borrar pago</button>' : '') + '</form>';
+    abrirHoja(pg ? 'Editar pago' : 'Pagar tarjeta', html, function (root) {
+      var primera = true;
       function actualizar() {
         var e = C.estadoTarjeta(d, $('#pg-t', root).value, h);
+        if (pg && pg.tarjeta === $('#pg-t', root).value) e.deuda += pg.monto; // el pago que editas no cuenta
         var contado = Math.min(e.conCorte ? (e.contado || e.contadoSiguiente) : e.deuda, e.deuda);
         $('#pg-info', root).textContent = infoContado(e);
-        $('#pg-m', root).value = contado > 0 ? C.decimal(contado) : '';
+        if (!(pg && primera)) $('#pg-m', root).value = contado > 0 ? C.decimal(contado) : '';
+        primera = false;
         $('#pg-contado', root).textContent = 'Contado ' + Q(contado);
         $('#pg-todo', root).textContent = 'Todo lo que debes ' + Q(e.deuda);
         $('#pg-contado', root).onclick = function () { $('#pg-m', root).value = C.decimal(contado); };
@@ -494,28 +586,70 @@
       actualizar(); $('#pg-t', root).addEventListener('change', actualizar);
       $('#f-pago', root).addEventListener('submit', function (e) {
         e.preventDefault();
-        var r = ejecutar({ tipo: 'pagarTarjeta', tarjeta: $('#pg-t', root).value, cuenta: $('#pg-c', root).value, monto: $('#pg-m', root).value, fecha: $('#pg-f', root).value });
+        var a = { tipo: pg ? 'editarPago' : 'pagarTarjeta', tarjeta: $('#pg-t', root).value, cuenta: $('#pg-c', root).value, monto: $('#pg-m', root).value, fecha: $('#pg-f', root).value };
+        if (pg) a.id = pg.id;
+        var r = ejecutar(a);
         if (!r.ok) return errorEn(root, '#pg-err', r.error);
-        cerrarHoja(); aviso('Pago registrado'); render();
+        cerrarHoja(); aviso(pg ? 'Pago actualizado' : 'Pago registrado'); render();
       });
+      var b = $('#pg-borrar', root);
+      if (b) dobleToque(b, 'Toca otra vez para borrar', function () { ejecutar({ tipo: 'borrarPago', id: pg.id }); cerrarHoja(); aviso('Pago borrado'); render(); });
     });
   }
-  function abrirMovCuenta(tipo, cid) {
-    var d = S.data, esR = tipo === 'retiro';
+  // Ingreso o retiro: nuevo (sin editId) o editar uno existente.
+  function abrirMovCuenta(tipo, cid, editId) {
+    var d = S.data, esR = tipo === 'retiro', tabla = esR ? 'retiros' : 'ingresos', mv = editId ? C.buscar(d[tabla], editId) : null;
+    if (mv) cid = mv.cuenta;
+    var cuentas = d.cuentas.filter(function (c) { return C.activo(c) || c.id === cid; });
     var html = '<form class="form" id="f-mov" novalidate>' +
-      '<label class="campo"><span>Cuenta</span><select id="mv-c">' + opciones(activos(d.cuentas), cid, function (c) { return c.nombre + ' · ' + Q(C.saldoCuenta(d, c.id)); }) + '</select></label>' +
-      '<label class="campo"><span>Descripción</span><input id="mv-d" placeholder="' + (esR ? 'Cajero, efectivo, transferencia…' : 'Salario, bono 14, venta…') + '"></label>' +
-      '<div class="dos"><label class="campo"><span>Monto</span><input id="mv-m" inputmode="decimal" placeholder="0.00"></label>' +
-      '<label class="campo"><span>Fecha</span><input id="mv-f" type="date" value="' + hoy() + '"></label></div>' +
+      '<label class="campo"><span>Cuenta</span><select id="mv-c">' + opciones(cuentas, cid, function (c) { return c.nombre + ' · ' + Q(C.saldoCuenta(d, c.id)); }) + '</select></label>' +
+      '<label class="campo"><span>Descripción</span><input id="mv-d" value="' + esc(mv ? mv.descripcion : '') + '" placeholder="' + (esR ? 'Cajero, efectivo…' : 'Salario, bono 14, venta…') + '"></label>' +
+      '<div class="dos"><label class="campo"><span>Monto</span><input id="mv-m" inputmode="decimal" placeholder="0.00" value="' + (mv ? C.decimal(mv.monto) : '') + '"></label>' +
+      '<label class="campo"><span>Fecha</span><input id="mv-f" type="date" value="' + (mv ? mv.fecha : hoy()) + '"></label></div>' +
       (esR ? '<p class="nota">Un retiro baja el saldo de la cuenta y puede dejarla en negativo. No cuenta como gasto: anota aparte en qué usas el efectivo.</p>' : '') +
-      '<p class="error" id="mv-err" hidden></p><button class="btn btn-principal" type="submit">Registrar ' + (esR ? 'retiro' : 'ingreso') + '</button></form>';
-    abrirHoja(esR ? 'Registrar retiro' : 'Registrar ingreso', html, function (root) {
+      '<p class="error" id="mv-err" hidden></p><button class="btn btn-principal" type="submit">' + (mv ? 'Guardar cambios' : 'Registrar ' + (esR ? 'retiro' : 'ingreso')) + '</button>' +
+      (mv ? '<button class="btn btn-peligro" type="button" id="mv-borrar">Borrar ' + (esR ? 'retiro' : 'ingreso') + '</button>' : '') + '</form>';
+    abrirHoja((mv ? 'Editar ' : 'Registrar ') + (esR ? 'retiro' : 'ingreso'), html, function (root) {
       $('#f-mov', root).addEventListener('submit', function (e) {
         e.preventDefault();
-        var r = ejecutar({ tipo: esR ? 'agregarRetiro' : 'agregarIngreso', cuenta: $('#mv-c', root).value, descripcion: $('#mv-d', root).value, monto: $('#mv-m', root).value, fecha: $('#mv-f', root).value });
+        var a = { tipo: (mv ? 'editar' : 'agregar') + (esR ? 'Retiro' : 'Ingreso'), cuenta: $('#mv-c', root).value, descripcion: $('#mv-d', root).value, monto: $('#mv-m', root).value, fecha: $('#mv-f', root).value };
+        if (mv) a.id = mv.id;
+        var r = ejecutar(a);
         if (!r.ok) return errorEn(root, '#mv-err', r.error);
-        cerrarHoja(); aviso(esR ? 'Retiro registrado' : 'Ingreso registrado'); render();
+        cerrarHoja(); aviso(mv ? 'Cambios guardados' : (esR ? 'Retiro registrado' : 'Ingreso registrado')); render();
       });
+      var b = $('#mv-borrar', root);
+      if (b) dobleToque(b, 'Toca otra vez para borrar', function () { ejecutar({ tipo: esR ? 'borrarRetiro' : 'borrarIngreso', id: mv.id }); cerrarHoja(); aviso('Borrado'); render(); });
+    });
+  }
+  // Transferencia entre tus cuentas: nueva o editar una existente.
+  function abrirTransferencia(origen, editId) {
+    var d = S.data, tr = editId ? C.buscar(d.transferencias, editId) : null;
+    var o = tr ? tr.origen : (origen || (activos(d.cuentas)[0] || {}).id);
+    var de = tr ? tr.destino : (activos(d.cuentas).filter(function (c) { return c.id !== o; })[0] || {}).id;
+    var cuentas = d.cuentas.filter(function (c) { return C.activo(c) || (tr && (c.id === tr.origen || c.id === tr.destino)); });
+    var etiqueta = function (c) { return c.nombre + ' · ' + Q(C.saldoCuenta(d, c.id)); };
+    var html = '<form class="form" id="f-tr" novalidate>' +
+      '<label class="campo"><span>Desde</span><select id="tr-o">' + opciones(cuentas, o, etiqueta) + '</select></label>' +
+      '<label class="campo"><span>Hacia</span><select id="tr-d">' + opciones(cuentas, de, etiqueta) + '</select></label>' +
+      '<label class="campo"><span>Descripción</span><input id="tr-n" value="' + esc(tr ? tr.descripcion : '') + '" placeholder="Ej.: Ahorro del mes"></label>' +
+      '<div class="dos"><label class="campo"><span>Monto</span><input id="tr-m" inputmode="decimal" placeholder="0.00" value="' + (tr ? C.decimal(tr.monto) : '') + '"></label>' +
+      '<label class="campo"><span>Fecha</span><input id="tr-f" type="date" value="' + (tr ? tr.fecha : hoy()) + '"></label></div>' +
+      '<p class="nota">Baja el saldo de una cuenta y sube el de la otra por el mismo monto. No cuenta como gasto ni como ingreso. La cuenta de origen puede quedar en negativo.</p>' +
+      '<p class="error" id="tr-err" hidden></p><button class="btn btn-principal" type="submit">' + (tr ? 'Guardar cambios' : 'Transferir') + '</button>' +
+      (tr ? '<button class="btn btn-peligro" type="button" id="tr-borrar">Borrar transferencia</button>' : '') + '</form>';
+    abrirHoja(tr ? 'Editar transferencia' : 'Transferencia', html, function (root) {
+      $('#f-tr', root).addEventListener('submit', function (e) {
+        e.preventDefault();
+        var a = { tipo: tr ? 'editarTransferencia' : 'agregarTransferencia', origen: $('#tr-o', root).value, destino: $('#tr-d', root).value,
+          descripcion: $('#tr-n', root).value, monto: $('#tr-m', root).value, fecha: $('#tr-f', root).value };
+        if (tr) a.id = tr.id;
+        var r = ejecutar(a);
+        if (!r.ok) return errorEn(root, '#tr-err', r.error);
+        cerrarHoja(); aviso(tr ? 'Transferencia actualizada' : 'Transferencia registrada'); render();
+      });
+      var b = $('#tr-borrar', root);
+      if (b) dobleToque(b, 'Toca otra vez para borrar', function () { ejecutar({ tipo: 'borrarTransferencia', id: tr.id }); cerrarHoja(); aviso('Transferencia borrada'); render(); });
     });
   }
   function abrirTarjeta(id) {
@@ -523,26 +657,39 @@
     var prox = [];
     d.cuotas.forEach(function (c) { if (c.tarjeta === id) { var x = C.estadoCuota(c, h); if (x.proxima) prox.push(x.proxima); } });
     prox.sort(function (a, b) { return a.fecha.localeCompare(b.fecha); });
-    var html = '<div class="cifra"><span class="eyebrow">Deuda actual' + (t.banco ? ' · ' + esc(t.banco) : '') + '</span><span class="cifra-valor num">' + Q(e.deuda) + '</span>' +
+    var html = '<div class="cifra"><span class="eyebrow">' + (e.deuda < 0 ? 'Saldo a tu favor' : 'Deuda actual') + (t.banco ? ' · ' + esc(t.banco) : '') + '</span><span class="cifra-valor num">' + Q(Math.abs(e.deuda)) + '</span>' +
       '<span class="sub">' + (e.conCorte ? 'Corte el ' + t.corte + ' · pago el ' + t.pago + ' de cada mes' : 'Sin día de corte') + '</span></div>' +
       '<p class="alerta suave">' + esc(infoContado(e)) + '</p>' +
       '<div><span class="eyebrow">Próximas cuotas</span><ul class="lista">' + (prox.length ? prox.map(function (x) {
         return '<li class="item"><span></span><span class="item-txt"><span class="item-nombre">' + esc(x.nombre) + '<span class="insignia">' + x.n + '/' + x.de + '</span></span><span class="item-meta">' + esc(C.fechaCorta(x.fecha)) + '</span></span><span class="item-monto num">' + Q(x.monto) + '</span></li>';
       }).join('') : '<li class="vacio">Sin cuotas pendientes en esta tarjeta.</li>') + '</ul></div>' +
+      (function () {
+        var pagos = movimientosBanco(function (tb, x) { return tb === 'pagos' && x.tarjeta === id; }).slice(0, 10);
+        return pagos.length ? '<div><span class="eyebrow">Pagos</span><ul class="lista">' + pagos.map(function (m) { return itemMov(m.t, m.x); }).join('') + '</ul></div>' : '';
+      })() +
       '<div class="fila-btns"><button type="button" class="btn btn-principal" id="t-pagar">Pagar</button><button type="button" class="btn" id="t-editar">Editar o quitar</button></div>';
     abrirHoja(t.nombre, html, function (root) {
+      clicsLista(root);
       $('#t-pagar', root).addEventListener('click', function () { abrirPago(id); });
       $('#t-editar', root).addEventListener('click', function () { abrirBanco('tarjetas', id); });
     });
   }
   function abrirCuenta(id) {
-    var c = C.buscar(S.data.cuentas, id);
-    var html = '<div class="cifra"><span class="eyebrow">Saldo' + (c.banco ? ' · ' + esc(c.banco) : '') + '</span><span class="cifra-valor num' + (C.saldoCuenta(S.data, id) < 0 ? ' negativo' : '') + '">' + Q(C.saldoCuenta(S.data, id)) + '</span></div>' +
+    var d = S.data, c = C.buscar(d.cuentas, id), saldo = C.saldoCuenta(d, id);
+    var movs = movimientosBanco(function (t, x) { return x.cuenta === id || x.origen === id || x.destino === id; })
+      .concat(d.gastos.filter(function (g) { return g.medio === id; }).map(function (g) { return { t: 'gastos', x: g, f: g.fecha }; }))
+      .sort(function (a, b) { return b.f.localeCompare(a.f); }).slice(0, 30);
+    var html = '<div class="cifra"><span class="eyebrow">Saldo' + (c.banco ? ' · ' + esc(c.banco) : '') + '</span><span class="cifra-valor num' + (saldo < 0 ? ' negativo' : '') + '">' + Q(saldo) + '</span></div>' +
       '<div class="fila-btns"><button type="button" class="btn btn-principal" id="c-ing">Ingreso</button><button type="button" class="btn btn-principal" id="c-ret">Retiro</button></div>' +
-      '<button type="button" class="btn" id="c-editar">Editar o quitar</button>';
+      '<div class="fila-btns"><button type="button" class="btn" id="c-tr"' + (activos(d.cuentas).length > 1 ? '' : ' disabled') + '>Transferir</button><button type="button" class="btn" id="c-editar">Editar o quitar</button></div>' +
+      '<div><span class="eyebrow">Movimientos · toca uno para editarlo</span><ul class="lista">' + (movs.length ? movs.map(function (m) {
+        return m.t === 'gastos' ? itemGasto(m.x) : itemMov(m.t, m.x, id);
+      }).join('') : '<li class="vacio">Sin movimientos todavía.</li>') + '</ul></div>';
     abrirHoja(c.nombre, html, function (root) {
+      clicsLista(root);
       $('#c-ing', root).addEventListener('click', function () { abrirMovCuenta('ingreso', id); });
       $('#c-ret', root).addEventListener('click', function () { abrirMovCuenta('retiro', id); });
+      $('#c-tr', root).addEventListener('click', function () { abrirTransferencia(id); });
       $('#c-editar', root).addEventListener('click', function () { abrirBanco('cuentas', id); });
     });
   }
@@ -600,9 +747,26 @@
       '<div><h2 class="titulo-bloque">Activas</h2><ul class="lista">' + (activas.length ? activas.map(fila).join('') : '<li class="vacio">No hay cuotas activas.</li>') + '</ul></div>' +
       (fin.length ? '<div><h2 class="titulo-bloque">Terminadas</h2><ul class="lista">' + fin.map(fila).join('') + '</ul></div>' : '');
   }
-  function abrirNuevaCuota() {
-    var d = S.data, reparto = repartoInicial(), tarjetas = activos(d.tarjetas);
+  // Sin id: compra nueva. Con id: edita todo de una compra en cuotas existente.
+  function repartoDesdePartes(partes, total) {
+    var r = repartoInicial();
+    if (partes.length === 1 && partes[0].p === 'yo') return r;
+    if (partes.length === 1) { r.modo = 'otra'; r.persona = partes[0].p; return r; }
+    r.modo = 'dividir';
+    r.sel = ['yo'].concat(partes.map(function (x) { return x.p; }).filter(function (p) { return p !== 'yo'; })).filter(function (p) { return partes.some(function (x) { return x.p === p; }); });
+    var ig = C.dividirIguales(total, r.sel);
+    var iguales = ig.every(function (y) { return partes.some(function (x) { return x.p === y.p && x.m === y.m; }); });
+    r.dividir = iguales ? 'iguales' : 'montos';
+    partes.forEach(function (x) { r.montos[x.p] = C.decimal(x.m); });
+    return r;
+  }
+  function abrirNuevaCuota(editId) {
+    var d = S.data, c = editId ? C.buscar(d.cuotas, editId) : null;
+    var reparto = c ? repartoDesdePartes(C.partesCuota(c), c.total) : repartoInicial();
+    var tarjetas = activos(d.tarjetas).concat(c ? d.tarjetas.filter(function (t) { return t.id === c.tarjeta && !C.activo(t); }) : []);
     if (!tarjetas.length) return aviso('Primero agrega una tarjeta en Bancos.');
+    var enCuota = c ? C.partesCuota(c).map(function (x) { return x.p; }) : [];
+    var titulo = c ? 'Editar cuotas' : 'Compra en cuotas';
     var html = '<form class="form" id="f-cuota" novalidate>' +
       '<label class="campo"><span>¿Qué compraste?</span><input id="cu-n" placeholder="Ej.: Intelaf El Naranjo"></label>' +
       '<div class="dos"><label class="campo"><span>Monto total</span><input id="cu-t" inputmode="decimal" placeholder="0.00"></label>' +
@@ -612,8 +776,9 @@
       '<label class="campo"><span>Categoría</span><select id="cu-cat">' + C.CATEGORIAS.map(function (c) { return '<option' + (c === 'Deudas y tarjetas' ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('') + '</select></label>' +
       '<button type="button" class="opcion" id="cu-para"><span class="opcion-lbl">Para</span><span id="cu-para-txt">Solo mío</span></button>' +
       '<p class="nota" id="cu-prev">Escribe el monto y el número de cuotas para ver el calendario.</p>' +
-      '<p class="error" id="cu-err" hidden></p><button class="btn btn-principal" type="submit">Guardar cuotas</button></form>';
-    var guardado = null;
+      (c ? '<p class="nota">Al guardar se recalcula todo el calendario con los datos nuevos: montos, fechas, tarjeta y lo que le toca a cada persona.</p>' : '') +
+      '<p class="error" id="cu-err" hidden></p><button class="btn btn-principal" type="submit">' + (c ? 'Guardar cambios' : 'Guardar cuotas') + '</button></form>';
+    var guardado = c ? { 'cu-n': c.nombre, 'cu-t': C.decimal(c.total), 'cu-k': String(c.numCuotas), 'cu-f': c.fechaInicio, 'cu-tc': c.tarjeta, 'cu-cat': c.categoria } : null;
     function montar(root) {
       if (guardado) Object.keys(guardado).forEach(function (k) { $('#' + k, root).value = guardado[k]; });
       $('#cu-para-txt', root).textContent = textoPara(reparto);
@@ -632,20 +797,22 @@
         guardado = {}; ['cu-n', 'cu-t', 'cu-k', 'cu-f', 'cu-tc', 'cu-cat'].forEach(function (k) { guardado[k] = $('#' + k, root).value; });
         abrirReparto({ estado: reparto, titulo: '¿De quién es la cuota?', nota: 'Solo personas permanentes. Cada una paga su parte en cuotas iguales.',
           total: function () { return C.parseMonto(guardado['cu-t']); },
-          personas: function () { return activos(d.personas).filter(function (p) { return p.tipo === 'permanente'; }); },
-          alCerrar: function () { setTimeout(function () { abrirHoja('Compra en cuotas', html, montar); }, 0); } });
+          personas: function () { return d.personas.filter(function (p) { return (C.activo(p) && p.tipo === 'permanente') || enCuota.indexOf(p.id) >= 0; }); },
+          alCerrar: function () { setTimeout(function () { abrirHoja(titulo, html, montar); }, 0); } });
       });
       $('#f-cuota', root).addEventListener('submit', function (e) {
         e.preventDefault();
         var t = C.parseMonto($('#cu-t', root).value), partes;
         if (t > 0) { var pr = partesDe(reparto, t); if (pr.error) return errorEn(root, '#cu-err', pr.error); partes = pr.partes; }
-        var r = ejecutar({ tipo: 'agregarCuota', nombre: $('#cu-n', root).value, total: $('#cu-t', root).value, numCuotas: $('#cu-k', root).value,
-          fechaInicio: $('#cu-f', root).value, tarjeta: $('#cu-tc', root).value, categoria: $('#cu-cat', root).value, partes: partes });
+        var a = { tipo: c ? 'editarCuota' : 'agregarCuota', nombre: $('#cu-n', root).value, total: $('#cu-t', root).value, numCuotas: $('#cu-k', root).value,
+          fechaInicio: $('#cu-f', root).value, tarjeta: $('#cu-tc', root).value, categoria: $('#cu-cat', root).value, partes: partes };
+        if (c) a.id = c.id;
+        var r = ejecutar(a);
         if (!r.ok) return errorEn(root, '#cu-err', r.error);
-        cerrarHoja(); aviso('Cuotas guardadas'); render();
+        cerrarHoja(); aviso(c ? 'Cambios guardados' : 'Cuotas guardadas'); render();
       });
     }
-    abrirHoja('Compra en cuotas', html, montar);
+    abrirHoja(titulo, html, montar);
   }
   function abrirCuota(id) {
     var c = C.buscar(S.data.cuotas, id); if (!c) return;
@@ -659,8 +826,10 @@
       '<ul class="lista">' + e.calendario.map(function (x) {
         return '<li class="item"><span class="insignia" style="margin:0">' + x.n + '/' + x.de + '</span><span class="item-txt"><span class="item-nombre">' + esc(C.fechaCorta(x.fecha)) + '</span>' +
           '<span class="item-meta">' + (x.fecha <= hoy() ? 'Cargada a la tarjeta' : 'Pendiente') + '</span></span><span class="item-monto num">' + Q(x.monto) + '</span></li>';
-      }).join('') + '</ul><button type="button" class="btn btn-peligro" id="cu-borrar">Borrar esta compra en cuotas</button>';
+      }).join('') + '</ul><button type="button" class="btn btn-principal" id="cu-editar">Editar</button>' +
+      '<button type="button" class="btn btn-peligro" id="cu-borrar">Borrar esta compra en cuotas</button>';
     abrirHoja(c.nombre, html, function (root) {
+      $('#cu-editar', root).addEventListener('click', function () { abrirNuevaCuota(id); });
       dobleToque($('#cu-borrar', root), 'Toca otra vez para borrar', function () { ejecutar({ tipo: 'borrarCuota', id: id }); cerrarHoja(); aviso('Cuotas borradas'); render(); });
     });
   }
@@ -698,10 +867,11 @@
     var parte = function (partes) { return partes.filter(function (y) { return y.p === id; })[0].m; };
     var html = '<div class="cifra"><span class="eyebrow">' + esc(C.nombreMes(ym)) + ' · te debe</span><span class="cifra-valor num">' + Q(x.total) + '</span>' +
       '<span class="sub">Gastos ' + Q(x.gastos) + ' · Cuotas ' + Q(x.cuotas) + '</span></div><ul class="lista">' +
-      gastos.map(function (g) { return '<li class="item">' + muestra(medioDe(g.medio).color) + '<span class="item-txt"><span class="item-nombre">' + esc(g.nombre) + '</span><span class="item-meta">' + esc(fechaTxt(g.fecha)) + '</span></span><span class="item-monto num">' + Q(parte(g.partes)) + '</span></li>'; }).join('') +
-      cuotas.map(function (c) { return '<li class="item">' + muestra(medioDe(c.tarjeta).color) + '<span class="item-txt"><span class="item-nombre">' + esc(c.nombre) + '<span class="insignia">' + c.n + '/' + c.de + '</span></span><span class="item-meta">Cuota · ' + esc(C.fechaCorta(c.fecha)) + '</span></span><span class="item-monto num">' + Q(parte(c.partes)) + '</span></li>'; }).join('') +
+      gastos.map(function (g) { return '<li><button type="button" class="item" data-gasto="' + esc(g.id) + '">' + muestra(medioDe(g.medio).color) + '<span class="item-txt"><span class="item-nombre">' + esc(g.nombre) + '</span><span class="item-meta">' + esc(fechaTxt(g.fecha)) + '</span></span><span class="item-monto num">' + Q(parte(g.partes)) + '</span></button></li>'; }).join('') +
+      cuotas.map(function (c) { return '<li><button type="button" class="item" data-cuota="' + esc(c.cuotaId) + '">' + muestra(medioDe(c.tarjeta).color) + '<span class="item-txt"><span class="item-nombre">' + esc(c.nombre) + '<span class="insignia">' + c.n + '/' + c.de + '</span></span><span class="item-meta">Cuota · ' + esc(C.fechaCorta(c.fecha)) + '</span></span><span class="item-monto num">' + Q(parte(c.partes)) + '</span></button></li>'; }).join('') +
       '</ul><button type="button" class="btn btn-peligro" id="pe-quitar">Quitar persona</button>';
     abrirHoja(p.nombre, html, function (root) {
+      clicsLista(root);
       dobleToque($('#pe-quitar', root), 'Toca otra vez para quitar', function () {
         var res = ejecutar({ tipo: 'borrarPersona', id: id });
         if (!res.ok) return aviso(res.error);
@@ -775,10 +945,11 @@
 
   // Clics en listas (delegados); lo que está dentro de la hoja lo maneja cada hoja.
   document.addEventListener('click', function (e) {
-    var t = e.target.closest('[data-gasto],[data-cuota],[data-cat],[data-tarjeta],[data-cuenta],[data-persona],[data-pagar],#b-pagar,#b-ingreso,#b-retiro,#b-nueva-t,#b-nueva-c,#cu-nueva');
+    var t = e.target.closest('[data-gasto],[data-cuota],[data-mov],[data-cat],[data-tarjeta],[data-cuenta],[data-persona],[data-pagar],#b-pagar,#b-ingreso,#b-retiro,#b-transferir,#b-nueva-t,#b-nueva-c,#cu-nueva');
     if (!t || t.closest('#hoja')) return;
     if (t.dataset.gasto) abrirGasto(t.dataset.gasto);
     else if (t.dataset.cuota) abrirCuota(t.dataset.cuota);
+    else if (t.dataset.mov) { var pm = t.dataset.mov.split(':'); abrirMov(pm[0], pm.slice(1).join(':')); }
     else if (t.dataset.cat && t.classList.contains('pres')) abrirLimite(t.dataset.cat);
     else if (t.dataset.tarjeta) abrirTarjeta(t.dataset.tarjeta);
     else if (t.dataset.cuenta) abrirCuenta(t.dataset.cuenta);
@@ -787,6 +958,7 @@
     else if (t.id === 'b-pagar') abrirPago();
     else if (t.id === 'b-ingreso') abrirMovCuenta('ingreso');
     else if (t.id === 'b-retiro') abrirMovCuenta('retiro');
+    else if (t.id === 'b-transferir') abrirTransferencia();
     else if (t.id === 'b-nueva-t') abrirBanco('tarjetas');
     else if (t.id === 'b-nueva-c') abrirBanco('cuentas');
     else if (t.id === 'cu-nueva') abrirNuevaCuota();
@@ -802,8 +974,10 @@
   }
   $('#f-conexion').addEventListener('submit', function (ev) {
     ev.preventDefault();
-    var url = $('#cx-url').value.trim(), clave = $('#cx-clave').value.trim(), e = $('#cx-error');
+    var url = $('#cx-url').value.replace(/\s+/g, ''), clave = $('#cx-clave').value.replace(/\s+/g, ''), e = $('#cx-error');
     if (!/^https:\/\/script\.google(usercontent)?\.com\//.test(url)) { e.textContent = 'La dirección tiene que empezar con https://script.google.com/'; e.hidden = false; return; }
+    if (/\/dev(\?|$)/.test(url)) { e.textContent = 'Esa es la dirección de prueba (termina en /dev) y solo funciona con tu sesión de Google. Usa la que termina en /exec.'; e.hidden = false; return; }
+    if (!/\/exec(\?|$)/.test(url)) { e.textContent = 'La dirección tiene que terminar en /exec. Cópiala desde el teléfono: engrane → Copiar.'; e.hidden = false; return; }
     if (!clave) { e.textContent = 'Escribe la clave secreta.'; e.hidden = false; return; }
     var btn = $('#cx-enviar'); btn.disabled = true; btn.textContent = 'Conectando…';
     var previo = S.cfg; S.cfg = { modo: 'remoto', url: url, clave: clave };
@@ -814,7 +988,7 @@
       $('#bienvenida').hidden = true; irA('anotar');
     }).catch(function () {
       S.cfg = previo; btn.disabled = false; btn.textContent = 'Conectar';
-      e.textContent = 'No pude conectarme. Revisa la dirección y que el script esté publicado para "Cualquier persona".'; e.hidden = false;
+      e.textContent = 'No pude conectarme con esa dirección. Revisa que sea exactamente la misma del teléfono (engrane → Copiar) y que el script esté publicado para "Cualquier persona". Si usas un bloqueador de anuncios, desactívalo para esta página.'; e.hidden = false;
     });
   });
   $('#cx-local').addEventListener('click', function () {

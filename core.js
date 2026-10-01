@@ -66,6 +66,9 @@ var Core = (function () {
     retiros: { hoja: 'Retiros', clave: 'id', cols: [
       ['id', 'ID', 'text'], ['fecha', 'Fecha', 'date'], ['cuenta', 'Cuenta', 'text'],
       ['descripcion', 'Descripción', 'text'], ['monto', 'Monto (Q)', 'money'], ['ejemplo', 'Ejemplo', 'bool']] },
+    transferencias: { hoja: 'Transferencias', clave: 'id', cols: [
+      ['id', 'ID', 'text'], ['fecha', 'Fecha', 'date'], ['origen', 'Desde cuenta', 'text'], ['destino', 'Hacia cuenta', 'text'],
+      ['descripcion', 'Descripción', 'text'], ['monto', 'Monto (Q)', 'money'], ['ejemplo', 'Ejemplo', 'bool']] },
     personas: { hoja: 'Personas', clave: 'id', cols: [
       ['id', 'ID', 'text'], ['nombre', 'Nombre', 'text'], ['tipo', 'Tipo', 'text'],
       ['mes', 'Mes (si es de un mes)', 'text'], ['ejemplo', 'Ejemplo', 'bool'], ['activa', 'Activa', 'boolSi']] },
@@ -326,6 +329,7 @@ var Core = (function () {
     var s = c.inicial || 0;
     data.ingresos.forEach(function (i) { if (i.cuenta === id) s += i.monto; });
     (data.retiros || []).forEach(function (r) { if (r.cuenta === id) s -= r.monto; });
+    (data.transferencias || []).forEach(function (t) { if (t.origen === id) s -= t.monto; if (t.destino === id) s += t.monto; });
     data.pagos.forEach(function (p) { if (p.cuenta === id) s -= p.monto; });
     data.gastos.forEach(function (g) { if (g.medio === id) s -= g.monto; });
     return s;
@@ -441,7 +445,8 @@ var Core = (function () {
       if (x.p !== 'yo') {
         var per = buscar(data.personas, x.p);
         if (!per) return 'No encuentro a la persona "' + x.p + '".';
-        if (!activo(per)) return per.nombre + ' ya no está en tu lista de personas.';
+        var yaEstaba = (op.permitidos || []).indexOf(x.p) >= 0;
+        if (!activo(per) && !yaEstaba) return per.nombre + ' ya no está en tu lista de personas.';
         if (op.permanentes && per.tipo !== 'permanente') return 'Las cuotas duran varios meses: ' + per.nombre + ' tiene que ser una persona permanente.';
         if (!op.permanentes && per.tipo === 'mes' && per.mes !== op.mes) return per.nombre + ' solo está registrada para ' + nombreMes(per.mes) + '.';
       }
@@ -461,43 +466,132 @@ var Core = (function () {
       data.cuotas.filter(function (c) { return c.tarjeta === id; }).length + data.pagos.filter(function (p) { return p.tarjeta === id; }).length;
     if (tabla === 'cuentas') return data.gastos.filter(function (g) { return g.medio === id; }).length +
       data.pagos.filter(function (p) { return p.cuenta === id; }).length + data.ingresos.filter(function (i) { return i.cuenta === id; }).length +
-      (data.retiros || []).filter(function (r) { return r.cuenta === id; }).length;
+      (data.retiros || []).filter(function (r) { return r.cuenta === id; }).length +
+      (data.transferencias || []).filter(function (t) { return t.origen === id || t.destino === id; }).length;
     return data.gastos.filter(function (g) { return g.partes.some(function (x) { return x.p === id; }); }).length +
       data.cuotas.filter(function (c) { return partesCuota(c).some(function (x) { return x.p === id; }); }).length;
   }
-  function movimientoCuenta(tabla, que) {
+  // Cuenta válida: activa, o la misma que ya tenía el registro que se está editando.
+  function cuentaOk(data, id, previa) { var c = buscar(data.cuentas, id); return c && (activo(c) || id === previa) ? c : null; }
+  // Ingresos y retiros: crear (editar = false) o editar (editar = true). Los retiros pueden dejar la cuenta en negativo.
+  function movimientoCuenta(tabla, que, editar) {
     return function (data, a, ctx) {
-      var c = buscar(data.cuentas, a.cuenta); if (!c || !activo(c)) return err('Elige la cuenta.');
+      var antes = editar ? buscar(data[tabla], a.id) : null;
+      if (editar && !antes) return err('No encuentro ese ' + que + '.');
+      var c = cuentaOk(data, a.cuenta, antes && antes.cuenta); if (!c) return err('Elige la cuenta.');
       var v = validarMonto(a.monto, 'el monto del ' + que); if (v.error) return err(v.error);
       var fecha = a.fecha || ctx.hoy; if (!fechaValida(fecha)) return err('La fecha no es válida.');
+      var desc = String(a.descripcion || '').trim() || (tabla === 'retiros' ? 'Retiro' : 'Ingreso');
+      if (editar) return okOps([{ op: 'update', tabla: tabla, id: antes.id, cambios: { fecha: fecha, cuenta: c.id, descripcion: desc, monto: v.c } }]);
       var id = a.id || nuevoId(ctx, tabla === 'retiros' ? 'r' : 'i');
       if (buscar(data[tabla], id)) return dup();
-      // Los retiros se permiten aunque no haya saldo: la cuenta puede quedar en negativo.
-      return okOps([{ op: 'add', tabla: tabla, row: { id: id, fecha: fecha, cuenta: c.id,
-        descripcion: String(a.descripcion || '').trim() || (tabla === 'retiros' ? 'Retiro' : 'Ingreso'), monto: v.c, ejemplo: !!ctx.ejemplo } }]);
+      return okOps([{ op: 'add', tabla: tabla, row: { id: id, fecha: fecha, cuenta: c.id, descripcion: desc, monto: v.c, ejemplo: !!ctx.ejemplo } }]);
     };
+  }
+  // Transferencias entre tus cuentas: baja una y sube la otra por el mismo monto. No es gasto ni ingreso.
+  function transferencia(editar) {
+    return function (data, a, ctx) {
+      var antes = editar ? buscar(data.transferencias, a.id) : null;
+      if (editar && !antes) return err('No encuentro esa transferencia.');
+      var o = cuentaOk(data, a.origen, antes && antes.origen); if (!o) return err('Elige la cuenta de donde sale el dinero.');
+      var d = cuentaOk(data, a.destino, antes && antes.destino); if (!d) return err('Elige la cuenta a donde llega el dinero.');
+      if (o.id === d.id) return err('La cuenta de origen y la de destino tienen que ser distintas.');
+      var v = validarMonto(a.monto, 'el monto de la transferencia'); if (v.error) return err(v.error);
+      var fecha = a.fecha || ctx.hoy; if (!fechaValida(fecha)) return err('La fecha no es válida.');
+      var desc = String(a.descripcion || '').trim() || 'Transferencia';
+      if (editar) return okOps([{ op: 'update', tabla: 'transferencias', id: antes.id, cambios: { fecha: fecha, origen: o.id, destino: d.id, descripcion: desc, monto: v.c } }]);
+      var id = a.id || nuevoId(ctx, 't');
+      if (buscar(data.transferencias, id)) return dup();
+      return okOps([{ op: 'add', tabla: 'transferencias', row: { id: id, fecha: fecha, origen: o.id, destino: d.id, descripcion: desc, monto: v.c, ejemplo: !!ctx.ejemplo } }]);
+    };
+  }
+  // Pagos de tarjeta: crear o editar. Al editar, el pago original no cuenta para los límites.
+  function pagoTarjeta(editar) {
+    return function (data, a, ctx) {
+      var antes = editar ? buscar(data.pagos, a.id) : null;
+      if (editar && !antes) return err('No encuentro ese pago.');
+      var t = buscar(data.tarjetas, a.tarjeta); if (!t) return err('Elige la tarjeta que vas a pagar.');
+      var c = cuentaOk(data, a.cuenta, antes && antes.cuenta); if (!c) return err('Elige la cuenta desde donde pagas.');
+      var v = validarMonto(a.monto, 'el monto del pago'); if (v.error) return err(v.error);
+      var fecha = a.fecha || ctx.hoy; if (!fechaValida(fecha)) return err('La fecha no es válida.');
+      if (!editar) { var id0 = a.id || nuevoId(ctx, 'p'); if (buscar(data.pagos, id0)) return dup(); }
+      var deuda = deudaTarjeta(data, t.id, ctx.hoy) + (antes && antes.tarjeta === t.id ? antes.monto : 0);
+      if (deuda <= 0) return err(t.nombre + ' no tiene deuda pendiente.');
+      if (v.c > deuda) return err('El pago (' + fmtQ(v.c) + ') es mayor que la deuda de ' + t.nombre + ' (' + fmtQ(deuda) + '). Puedes pagar como máximo ' + fmtQ(deuda) + '.');
+      var saldo = saldoCuenta(data, c.id) + (antes && antes.cuenta === c.id ? antes.monto : 0);
+      if (v.c > saldo) return err(c.nombre + ' tiene ' + fmtQ(saldo) + '. No alcanza para pagar ' + fmtQ(v.c) + '.');
+      if (editar) return okOps([{ op: 'update', tabla: 'pagos', id: antes.id, cambios: { fecha: fecha, tarjeta: t.id, cuenta: c.id, monto: v.c } }]);
+      return okOps([{ op: 'add', tabla: 'pagos', row: { id: id0, fecha: fecha, tarjeta: t.id, cuenta: c.id, monto: v.c, ejemplo: !!ctx.ejemplo } }]);
+    };
+  }
+  function borrarDe(tabla) {
+    return function (data, a) { return okOps(buscar(data[tabla], a.id) ? [{ op: 'delete', tabla: tabla, id: a.id }] : []); };
+  }
+  // Valida y arma un gasto (nuevo o editado). `antes` = el gasto original al editar.
+  function armarGasto(data, a, ctx, antes) {
+    var nombre = String(a.nombre || '').trim();
+    if (!nombre) return { error: 'Escribe en qué fue el gasto. Ejemplo: almuerzo' };
+    var v = validarMonto(a.monto); if (v.error) return { error: v.error };
+    var fecha = a.fecha || ctx.hoy; if (!fechaValida(fecha)) return { error: 'La fecha no es válida.' };
+    var med = a.medio || ultimoMedio(data), m = med && medio(data, med);
+    if (!m) return { error: 'Elige una tarjeta o cuenta.' };
+    if (!activo(m.obj) && !(antes && antes.medio === med) && !(!antes && a.id)) return { error: m.obj.nombre + ' está cerrada. Elige otra.' };
+    var cl = clasificar(nombre, data.reglas);
+    var cat = CATEGORIAS.indexOf(a.categoria) >= 0 ? a.categoria : cl.categoria;
+    var tipo = TIPOS.indexOf(a.tipoGasto) >= 0 ? a.tipoGasto : (a.categoria ? TIPO_POR_CATEGORIA[cat] : cl.tipo);
+    var partes = normalizarPartes(a.partes, v.c);
+    var previas = antes ? antes.partes.map(function (x) { return x.p; }) : [];
+    var e = validarPartes(data, partes, v.c, { mes: mesContable(data, med, fecha), permitidos: previas }); if (e) return { error: e };
+    return { campos: { fecha: fecha, nombre: nombre, monto: v.c, categoria: cat, tipo: tipo, medio: med, partes: partes }, regla: cl.regla };
+  }
+
+  // Valida y arma una compra en cuotas (nueva o editada). `antes` = la cuota original al editar.
+  function armarCuota(data, a, ctx, id, antes) {
+    var nombre = String(a.nombre || '').trim(); if (!nombre) return { error: 'Escribe qué compraste en cuotas.' };
+    if (!fechaValida(a.fechaInicio)) return { error: 'Elige la fecha de la primera cuota.' };
+    var v = validarMonto(a.total, 'el monto total'); if (v.error) return { error: v.error };
+    var n = parseInt(a.numCuotas, 10);
+    if (!(n >= 1 && n <= 120) || String(n) !== String(a.numCuotas).trim()) return { error: 'El número de cuotas tiene que ser un número entero entre 1 y 120.' };
+    if (v.c < n) return { error: 'El monto total es muy pequeño para ' + n + ' cuotas.' };
+    var t = buscar(data.tarjetas, a.tarjeta);
+    var tarjetaOk = t && (activo(t) || (antes && antes.tarjeta === t.id) || (!antes && a.id));
+    if (!tarjetaOk) return { error: 'Elige la tarjeta de la cuota.' };
+    var partes = normalizarPartes(a.partes, v.c, a.dueno);
+    var previas = antes ? partesCuota(antes).map(function (x) { return x.p; }) : [];
+    var e = validarPartes(data, partes, v.c, { permanentes: true, permitidos: previas }); if (e) return { error: e };
+    var cl = clasificar(nombre, data.reglas);
+    var cat = CATEGORIAS.indexOf(a.categoria) >= 0 ? a.categoria : cl.categoria;
+    var row = { id: id, nombre: nombre, fechaInicio: a.fechaInicio, total: v.c, numCuotas: n,
+      dueno: partes.length === 1 ? partes[0].p : 'varios', partes: partes, tarjeta: t.id, categoria: cat,
+      tipo: TIPOS.indexOf(a.tipoGasto) >= 0 ? a.tipoGasto : (a.categoria ? TIPO_POR_CATEGORIA[cat] : cl.tipo),
+      ejemplo: antes ? !!antes.ejemplo : !!ctx.ejemplo };
+    var cal = calendarioCuota(row);
+    row.montoCuota = cal[0].monto; row.fechaFinal = cal[cal.length - 1].fecha;
+    return { row: row, cal: cal };
   }
 
   var acciones = {
     agregarGasto: function (data, a, ctx) {
-      var nombre = String(a.nombre || '').trim();
-      if (!nombre) return err('Escribe en qué fue el gasto. Ejemplo: almuerzo');
-      var v = validarMonto(a.monto); if (v.error) return err(v.error);
-      var fecha = a.fecha || ctx.hoy; if (!fechaValida(fecha)) return err('La fecha no es válida.');
       var id = a.id || nuevoId(ctx, 'g');
       if (buscar(data.gastos, id)) return dup();
-      var med = a.medio || ultimoMedio(data), m = med && medio(data, med);
-      if (!m) return err('Elige una tarjeta o cuenta.');
-      if (!activo(m.obj) && !a.id) return err(m.obj.nombre + ' está cerrada. Elige otra.');
-      var cl = clasificar(nombre, data.reglas);
-      var cat = CATEGORIAS.indexOf(a.categoria) >= 0 ? a.categoria : cl.categoria;
-      var tipo = TIPOS.indexOf(a.tipoGasto) >= 0 ? a.tipoGasto : (a.categoria ? TIPO_POR_CATEGORIA[cat] : cl.tipo);
-      var partes = normalizarPartes(a.partes, v.c);
-      var e = validarPartes(data, partes, v.c, { mes: mesContable(data, med, fecha) }); if (e) return err(e);
-      var row = { id: id, fecha: fecha, nombre: nombre, monto: v.c, categoria: cat, tipo: tipo, medio: med,
-        partes: partes, origen: a.origen || 'app', revisado: a.origen !== 'atajo',
-        creado: ctx.ahora || new Date().toISOString(), ejemplo: !!ctx.ejemplo };
-      return okOps([{ op: 'add', tabla: 'gastos', row: row }], { gasto: row, regla: cl.regla });
+      var r = armarGasto(data, a, ctx, null); if (r.error) return err(r.error);
+      var row = r.campos; row.id = id; row.origen = a.origen || 'app'; row.revisado = a.origen !== 'atajo';
+      row.creado = ctx.ahora || new Date().toISOString(); row.ejemplo = !!ctx.ejemplo;
+      return okOps([{ op: 'add', tabla: 'gastos', row: row }], { gasto: row, regla: r.regla });
+    },
+    // Edita todo el gasto. Si cambias la categoría, también aprende la regla para la próxima vez.
+    editarGasto: function (data, a, ctx) {
+      var g = buscar(data.gastos, a.id); if (!g) return err('No encuentro ese gasto.');
+      var r = armarGasto(data, a, ctx, g); if (r.error) return err(r.error);
+      var cambios = r.campos; cambios.revisado = true;
+      var ops = [{ op: 'update', tabla: 'gastos', id: g.id, cambios: cambios }];
+      var palabra = palabraParaRegla(cambios.nombre);
+      if (palabra && (cambios.categoria !== g.categoria || cambios.tipo !== g.tipo)) {
+        var regla = buscar(data.reglas, palabra, 'palabra');
+        var nueva = { palabra: palabra, categoria: cambios.categoria, tipo: cambios.tipo, origen: 'usuario' };
+        ops.push(regla ? { op: 'update', tabla: 'reglas', id: palabra, cambios: nueva } : { op: 'add', tabla: 'reglas', row: nueva });
+      }
+      return okOps(ops, { gasto: Object.assign({}, g, cambios), palabra: palabra });
     },
     reclasificar: function (data, a) {
       var g = buscar(data.gastos, a.id); if (!g) return err('No encuentro ese gasto.');
@@ -520,47 +614,33 @@ var Core = (function () {
       return okOps(buscar(data.gastos, a.id) ? [{ op: 'delete', tabla: 'gastos', id: a.id }] : []);
     },
     agregarCuota: function (data, a, ctx) {
-      var nombre = String(a.nombre || '').trim(); if (!nombre) return err('Escribe qué compraste en cuotas.');
-      if (!fechaValida(a.fechaInicio)) return err('Elige la fecha de la primera cuota.');
-      var v = validarMonto(a.total, 'el monto total'); if (v.error) return err(v.error);
-      var n = parseInt(a.numCuotas, 10);
-      if (!(n >= 1 && n <= 120) || String(n) !== String(a.numCuotas).trim()) return err('El número de cuotas tiene que ser un número entero entre 1 y 120.');
-      if (v.c < n) return err('El monto total es muy pequeño para ' + n + ' cuotas.');
-      var t = buscar(data.tarjetas, a.tarjeta);
-      if (!t || (!activo(t) && !a.id)) return err('Elige la tarjeta de la cuota.');
       var id = a.id || nuevoId(ctx, 'c');
       if (buscar(data.cuotas, id)) return dup();
-      var partes = normalizarPartes(a.partes, v.c, a.dueno);
-      var e = validarPartes(data, partes, v.c, { permanentes: true }); if (e) return err(e);
-      var cl = clasificar(nombre, data.reglas);
-      var cat = CATEGORIAS.indexOf(a.categoria) >= 0 ? a.categoria : cl.categoria;
-      var row = { id: id, nombre: nombre, fechaInicio: a.fechaInicio, total: v.c, numCuotas: n,
-        dueno: partes.length === 1 ? partes[0].p : 'varios', partes: partes, tarjeta: t.id, categoria: cat,
-        tipo: TIPOS.indexOf(a.tipoGasto) >= 0 ? a.tipoGasto : (a.categoria ? TIPO_POR_CATEGORIA[cat] : cl.tipo),
-        ejemplo: !!ctx.ejemplo };
-      var cal = calendarioCuota(row);
-      row.montoCuota = cal[0].monto; row.fechaFinal = cal[cal.length - 1].fecha;
-      return okOps([{ op: 'add', tabla: 'cuotas', row: row }], { calendario: cal });
+      var r = armarCuota(data, a, ctx, id, null); if (r.error) return err(r.error);
+      return okOps([{ op: 'add', tabla: 'cuotas', row: r.row }], { calendario: r.cal });
+    },
+    // Edita todo: descripción, monto total, número de cuotas, fecha de la primera cuota, tarjeta, categoría y reparto.
+    editarCuota: function (data, a, ctx) {
+      var c = buscar(data.cuotas, a.id); if (!c) return err('No encuentro esa compra en cuotas.');
+      var r = armarCuota(data, a, ctx, c.id, c); if (r.error) return err(r.error);
+      var cambios = {}; Object.keys(r.row).forEach(function (k) { if (k !== 'id' && k !== 'ejemplo') cambios[k] = r.row[k]; });
+      return okOps([{ op: 'update', tabla: 'cuotas', id: c.id, cambios: cambios }], { calendario: r.cal });
     },
     borrarCuota: function (data, a) {
       return okOps(buscar(data.cuotas, a.id) ? [{ op: 'delete', tabla: 'cuotas', id: a.id }] : []);
     },
-    pagarTarjeta: function (data, a, ctx) {
-      var t = buscar(data.tarjetas, a.tarjeta); if (!t) return err('Elige la tarjeta que vas a pagar.');
-      var c = buscar(data.cuentas, a.cuenta); if (!c || !activo(c)) return err('Elige la cuenta desde donde pagas.');
-      var v = validarMonto(a.monto, 'el monto del pago'); if (v.error) return err(v.error);
-      var fecha = a.fecha || ctx.hoy; if (!fechaValida(fecha)) return err('La fecha no es válida.');
-      var id = a.id || nuevoId(ctx, 'p');
-      if (buscar(data.pagos, id)) return dup();
-      var deuda = deudaTarjeta(data, t.id, ctx.hoy);
-      if (deuda <= 0) return err(t.nombre + ' no tiene deuda pendiente.');
-      if (v.c > deuda) return err('El pago (' + fmtQ(v.c) + ') es mayor que la deuda de ' + t.nombre + ' (' + fmtQ(deuda) + '). Puedes pagar como máximo ' + fmtQ(deuda) + '.');
-      var saldo = saldoCuenta(data, c.id);
-      if (v.c > saldo) return err(c.nombre + ' tiene ' + fmtQ(saldo) + '. No alcanza para pagar ' + fmtQ(v.c) + '.');
-      return okOps([{ op: 'add', tabla: 'pagos', row: { id: id, fecha: fecha, tarjeta: t.id, cuenta: c.id, monto: v.c, ejemplo: !!ctx.ejemplo } }]);
-    },
+    pagarTarjeta: pagoTarjeta(false),
+    editarPago: pagoTarjeta(true),
+    borrarPago: borrarDe('pagos'),
     agregarIngreso: movimientoCuenta('ingresos', 'ingreso'),
     agregarRetiro: movimientoCuenta('retiros', 'retiro'),
+    editarIngreso: movimientoCuenta('ingresos', 'ingreso', true),
+    editarRetiro: movimientoCuenta('retiros', 'retiro', true),
+    borrarIngreso: borrarDe('ingresos'),
+    borrarRetiro: borrarDe('retiros'),
+    agregarTransferencia: transferencia(false),
+    editarTransferencia: transferencia(true),
+    borrarTransferencia: borrarDe('transferencias'),
     agregarBanco: function (data, a, ctx) {
       var tabla = a.tabla === 'cuentas' ? 'cuentas' : 'tarjetas', esT = tabla === 'tarjetas';
       var nombre = String(a.nombre || '').trim(); if (!nombre) return err('Escribe el nombre de la ' + (esT ? 'tarjeta' : 'cuenta') + '.');
