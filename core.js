@@ -284,7 +284,7 @@ var Core = (function () {
     return d;
   }
   function pagosDe(data, id) { return data.pagos.reduce(function (a, p) { return a + (p.tarjeta === id ? p.monto : 0); }, 0); }
-  // Todo lo que se debe hoy: compras (de cualquier fecha) + cuotas ya cargadas − pagos.
+  // Todo lo cargado hasta hoy (incluye cuotas ya vencidas) − pagos. Solo se usa para validar.
   function deudaTarjeta(data, id, hoy) {
     var t = buscar(data.tarjetas, id); if (!t) return 0;
     var d = t.inicial || 0;
@@ -292,30 +292,75 @@ var Core = (function () {
     data.cuotas.forEach(function (c) { if (c.tarjeta === id) calendarioCuota(c).forEach(function (x) { if (x.fecha <= hoy) d += x.monto; }); });
     return d - pagosDe(data, id);
   }
-  // Pago de contado del estado que cierra en `corte`: lo cargado hasta el corte menos todo lo pagado.
   function contadoAlCorte(data, id, corte) { return Math.max(0, cargosHasta(data, id, corte) - pagosDe(data, id)); }
+
+  /* Estado de cuenta MES A MES de una tarjeta.
+     Cada ciclo (mes contable) suma sus compras y SOLO la cuota de ese mes de cada compra en cuotas
+     (lo que falta por pagar de las cuotas se ve en la sección Cuotas).
+     Se empieza a contar desde el primer ciclo en que registraste algo con esa tarjeta, así las cuotas
+     de meses anteriores a usar la app no aparecen como deuda.
+     Los pagos se aplican al ciclo más antiguo que tenga saldo pendiente. */
+  function ciclosTarjeta(data, id, hastaYm) {
+    var t = buscar(data.tarjetas, id), porMes = {}, inicio = null;
+    function suma(ym, k, m) { porMes[ym] = porMes[ym] || { compras: 0, cuotas: 0 }; porMes[ym][k] += m; }
+    data.gastos.forEach(function (g) {
+      if (g.medio !== id) return;
+      var ym = mesContable(data, id, g.fecha); suma(ym, 'compras', g.monto);
+      if (!inicio || ym < inicio) inicio = ym;
+    });
+    data.pagos.forEach(function (p) {
+      if (p.tarjeta !== id) return;
+      var ym = mesContable(data, id, p.fecha); if (!inicio || ym < inicio) inicio = ym;
+    });
+    if (!inicio || inicio > hastaYm) inicio = hastaYm;
+    data.cuotas.forEach(function (c) {
+      if (c.tarjeta !== id) return;
+      calendarioCuota(c).forEach(function (x) { var ym = mesContable(data, id, x.fecha); if (ym >= inicio && ym <= hastaYm) suma(ym, 'cuotas', x.monto); });
+    });
+    var disponible = pagosDe(data, id), ciclos = [];
+    for (var ym = inicio; ym <= hastaYm; ym = sumarMeses(ym, 1)) {
+      var m = porMes[ym] || { compras: 0, cuotas: 0 }, total = m.compras + m.cuotas, pagado = Math.min(total, disponible);
+      disponible -= pagado;
+      ciclos.push({ mes: ym, ciclo: cicloDelMes(t, ym), compras: m.compras, cuotas: m.cuotas, total: total, pagado: pagado, pendiente: total - pagado });
+    }
+    return { ciclos: ciclos, aFavor: disponible };
+  }
+  function cicloVacio(t, ym) { return { mes: ym, ciclo: cicloDelMes(t, ym), compras: 0, cuotas: 0, total: 0, pagado: 0, pendiente: 0 }; }
+  // Lo que importa este mes: el ciclo que toca pagar (el que cerró, si aún no vence y debe algo; si no, el que está abierto).
   function estadoTarjeta(data, id, hoy) {
-    var t = buscar(data.tarjetas, id);
-    var e = { deuda: deudaTarjeta(data, id, hoy), conCorte: tieneCorte(t) };
-    if (!e.conCorte) return e;
-    e.ultimoCorte = ultimoCorte(t, hoy); e.pagoUltimo = fechaPagoDe(t, e.ultimoCorte);
-    e.contado = contadoAlCorte(data, id, e.ultimoCorte);
-    e.siguienteCorte = siguienteCorte(t, hoy); e.pagoSiguiente = fechaPagoDe(t, e.siguienteCorte);
-    e.contadoSiguiente = contadoAlCorte(data, id, e.siguienteCorte);
+    var t = buscar(data.tarjetas, id), e = { conCorte: tieneCorte(t) };
+    var mesUlt, mesSig, pagoUlt = null;
+    if (e.conCorte) {
+      var ult = ultimoCorte(t, hoy), sig = siguienteCorte(t, hoy);
+      mesUlt = mesDe(ult); mesSig = mesDe(sig); pagoUlt = fechaPagoDe(t, ult);
+    } else { mesSig = mesDe(hoy); mesUlt = sumarMeses(mesSig, -1); }
+    var r = ciclosTarjeta(data, id, mesSig);
+    var busca = function (ym) { return r.ciclos.filter(function (c) { return c.mes === ym; })[0] || cicloVacio(t, ym); };
+    var cUlt = busca(mesUlt), cSig = busca(mesSig);
+    e.ciclo = e.conCorte && pagoUlt >= hoy && cUlt.pendiente > 0 ? cUlt : cSig;
+    e.anteriores = r.ciclos.filter(function (c) { return c.mes < e.ciclo.mes; }).reduce(function (a, c) { return a + c.pendiente; }, 0);
+    e.porPagar = e.anteriores + e.ciclo.pendiente;
+    e.aFavor = r.aFavor; e.ciclos = r.ciclos; e.cicloUltimo = cUlt; e.cicloSiguiente = cSig;
+    e.deuda = deudaTarjeta(data, id, hoy);
     return e;
   }
-  // Pagos de tarjeta que vencen dentro de `dias` días (0 = hoy).
+  // Máximo que se acepta como pago: lo cargado hasta el próximo corte (con la cuota de ese ciclo) − lo pagado.
+  function limitePago(data, id, hoy) {
+    var t = buscar(data.tarjetas, id); if (!t) return 0;
+    var tope = tieneCorte(t) ? siguienteCorte(t, hoy) : diaEn(mesDe(hoy), 31);
+    return Math.max(cargosHasta(data, id, tope) - pagosDe(data, id), estadoTarjeta(data, id, hoy).porPagar);
+  }
+  // Pagos de tarjeta que vencen dentro de `dias` días (0 = hoy), con lo pendiente de ese ciclo.
   function recordatorios(data, hoy, dias) {
     if (dias === undefined) dias = DIAS_AVISO_PAGO;
     var out = [];
     data.tarjetas.forEach(function (t) {
       if (!activo(t) || !tieneCorte(t)) return;
-      var vistos = {};
-      [ultimoCorte(t, hoy), siguienteCorte(t, hoy)].forEach(function (corte) {
-        var pago = fechaPagoDe(t, corte), d = diasEntre(hoy, pago);
-        if (vistos[pago] || d < 0 || d > dias) return; vistos[pago] = 1;
-        var monto = contadoAlCorte(data, t.id, corte);
-        if (monto > 0) out.push({ tarjeta: t.id, nombre: t.nombre, corte: corte, pago: pago, dias: d, monto: monto, estimado: corte > hoy });
+      var e = estadoTarjeta(data, t.id, hoy), vistos = {};
+      [e.cicloUltimo, e.cicloSiguiente].forEach(function (c) {
+        var pago = c.ciclo.pago, d = diasEntre(hoy, pago);
+        if (vistos[pago] || d < 0 || d > dias || c.pendiente <= 0) return; vistos[pago] = 1;
+        out.push({ tarjeta: t.id, nombre: t.nombre, corte: c.ciclo.hasta, pago: pago, dias: d, monto: c.pendiente, estimado: c.ciclo.hasta > hoy });
       });
     });
     return out.sort(function (a, b) { return a.pago.localeCompare(b.pago); });
@@ -515,7 +560,7 @@ var Core = (function () {
       var v = validarMonto(a.monto, 'el monto del pago'); if (v.error) return err(v.error);
       var fecha = a.fecha || ctx.hoy; if (!fechaValida(fecha)) return err('La fecha no es válida.');
       if (!editar) { var id0 = a.id || nuevoId(ctx, 'p'); if (buscar(data.pagos, id0)) return dup(); }
-      var deuda = deudaTarjeta(data, t.id, ctx.hoy) + (antes && antes.tarjeta === t.id ? antes.monto : 0);
+      var deuda = limitePago(data, t.id, ctx.hoy) + (antes && antes.tarjeta === t.id ? antes.monto : 0);
       if (deuda <= 0) return err(t.nombre + ' no tiene deuda pendiente.');
       if (v.c > deuda) return err('El pago (' + fmtQ(v.c) + ') es mayor que la deuda de ' + t.nombre + ' (' + fmtQ(deuda) + '). Puedes pagar como máximo ' + fmtQ(deuda) + '.');
       var saldo = saldoCuenta(data, c.id) + (antes && antes.cuenta === c.id ? antes.monto : 0);
@@ -673,10 +718,15 @@ var Core = (function () {
       return okOps([{ op: 'update', tabla: tabla, id: x.id, cambios: cambios }]);
     },
     // Si tiene movimientos se archiva (queda en el historial pero ya no aparece para elegir).
-    borrarBanco: function (data, a) {
+    borrarBanco: function (data, a, ctx) {
       var tabla = a.tabla === 'cuentas' ? 'cuentas' : 'tarjetas';
       var x = buscar(data[tabla], a.id); if (!x) return okOps([]);
-      if (tabla === 'tarjetas' && deudaTarjeta(data, x.id, '9999-12-31') > 0) return err(x.nombre + ' todavía tiene deuda o cuotas pendientes. Págala antes de quitarla.');
+      if (tabla === 'tarjetas') {
+        var hoyB = ctx.hoy;
+        var cuotasPend = data.cuotas.some(function (c) { return c.tarjeta === x.id && calendarioCuota(c).some(function (q) { return q.fecha > hoyB; }); });
+        if (cuotasPend) return err(x.nombre + ' todavía tiene cuotas pendientes. Bórralas o espera a que terminen antes de quitarla.');
+        if (estadoTarjeta(data, x.id, hoyB).porPagar > 0) return err(x.nombre + ' todavía tiene saldo por pagar. Págalo antes de quitarla.');
+      }
       if (usosDe(data, tabla, x.id)) return okOps([{ op: 'update', tabla: tabla, id: x.id, cambios: { activa: false } }], { archivada: true });
       return okOps([{ op: 'delete', tabla: tabla, id: x.id }], { archivada: false });
     },
@@ -843,7 +893,7 @@ var Core = (function () {
     tieneCorte: tieneCorte, ultimoCorte: ultimoCorte, siguienteCorte: siguienteCorte, fechaPagoDe: fechaPagoDe,
     mesContable: mesContable, cicloDelMes: cicloDelMes,
     partesCuota: partesCuota, calendarioCuota: calendarioCuota, estadoCuota: estadoCuota, describirDueno: describirDueno,
-    deudaTarjeta: deudaTarjeta, contadoAlCorte: contadoAlCorte, estadoTarjeta: estadoTarjeta,
+    deudaTarjeta: deudaTarjeta, contadoAlCorte: contadoAlCorte, estadoTarjeta: estadoTarjeta, ciclosTarjeta: ciclosTarjeta, limitePago: limitePago,
     recordatorios: recordatorios, textoRecordatorio: textoRecordatorio, saldoCuenta: saldoCuenta,
     ultimoMedio: ultimoMedio, personasDelMes: personasDelMes, usosDe: usosDe, recuento: recuento,
     presupuestoMes: presupuestoMes, mesesConActividad: mesesConActividad, aplicar: aplicar, aplicarOps: aplicarOps,

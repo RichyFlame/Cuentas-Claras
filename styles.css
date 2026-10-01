@@ -328,3 +328,53 @@ button.alerta { border: 0; text-align: left; font: inherit; font-size: var(--t-s
 .btn[disabled] { opacity: .45; }
 .fila-btns .btn { flex: 1 1 0; padding-inline: 10px; font-size: .9375rem; }
 .negativo { color: var(--pasado); }
+
+/* ---------- v6: fechas dd/mm/aaaa, calendario, cuotas por tarjeta ---------- */
+.fecha-campo { position: relative; display: flex; min-width: 0; }
+.fecha-campo .fecha-txt { padding-right: 48px; font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+.fecha-btn {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  width: 40px; height: 40px; border: 0; border-radius: 10px; background: none; color: var(--acento);
+  display: grid; place-items: center;
+}
+.fecha-btn svg, .cal svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.fecha-btn:active { background: var(--acento-suave); }
+
+.cal-velo { position: fixed; inset: 0; z-index: 50; background: rgba(10, 16, 13, .38); }
+.cal {
+  position: fixed; z-index: 51; left: 50%; bottom: calc(env(safe-area-inset-bottom, 0px) + 16px); transform: translateX(-50%);
+  width: min(360px, calc(100% - 32px)); background: var(--superficie); border-radius: 22px; box-shadow: var(--sombra);
+  padding: 14px 14px 12px; display: grid; gap: 8px; animation: sube .2s cubic-bezier(.2, .8, .2, 1);
+}
+.cal-cab { display: grid; grid-template-columns: 40px 1fr 40px; align-items: center; }
+.cal-titulo {
+  border: 0; background: none; font: 650 var(--t-l)/1.2 var(--f-display); text-transform: capitalize;
+  padding: 6px 10px; border-radius: 10px; justify-self: center;
+}
+.cal-titulo::after { content: " ▾"; font-size: .7em; color: var(--tenue); }
+.cal-nav { width: 40px; height: 40px; border-radius: 50%; border: 0; background: var(--papel); font-size: 1.3rem; line-height: 1; color: var(--tinta); }
+.cal-semana, .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); text-align: center; }
+.cal-semana span { font-size: var(--t-xs); color: var(--tenue); font-weight: 600; padding: 4px 0; }
+.cal-grid { row-gap: 2px; }
+.cal-dia {
+  aspect-ratio: 1; max-width: 100%; border: 0; background: none; border-radius: 50%; font-size: var(--t-m);
+  font-variant-numeric: tabular-nums; color: var(--tinta); margin: 1px;
+}
+.cal-dia:hover { background: var(--papel); }
+.cal-dia.hoy { box-shadow: inset 0 0 0 1.5px var(--acento); color: var(--acento); font-weight: 600; }
+.cal-dia.sel { background: var(--acento); color: var(--sobre-acento); font-weight: 650; box-shadow: none; }
+.cal-meses { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 6px 0; }
+.cal-mes { border: 0; background: var(--papel); border-radius: 12px; padding: 14px 0; font-size: var(--t-m); text-transform: capitalize; color: var(--tinta); }
+.cal-mes.hoy { box-shadow: inset 0 0 0 1.5px var(--acento); }
+.cal-mes.sel { background: var(--acento); color: var(--sobre-acento); font-weight: 650; }
+.cal-pie { display: flex; gap: 8px; padding-top: 4px; border-top: 1px solid var(--linea); }
+.cal-pie .btn { flex: none; }
+.cal-pie .btn-texto { margin-left: auto; }
+
+.item-meta.envuelve { white-space: normal; }
+.grupo-tarjeta + .grupo-tarjeta { margin-top: 14px; }
+.grupo-cab { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1.5px solid var(--tinta); }
+.grupo-nombre { font-weight: 600; flex: 1; min-width: 0; }
+.grupo-tarjeta .item { grid-template-columns: minmax(0, 1fr) auto; }
+.grupo-tarjeta .item > span:first-child:empty { display: none; }
+#cu-filtro { margin-top: -8px; }

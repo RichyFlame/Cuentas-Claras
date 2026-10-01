@@ -18,7 +18,7 @@
   function repartoInicial() { return { modo: 'mio', persona: null, sel: ['yo'], dividir: 'iguales', montos: {} }; }
   var S = {
     cfg: LS.get('cfg', null), data: null, mes: null, mesElegido: false, tab: 'anotar',
-    medio: null, fecha: null, reparto: repartoInicial(), outbox: LS.get('outbox', []), sync: 'ok', cargando: false
+    medio: null, fecha: null, filtroCuotas: 'todas', reparto: repartoInicial(), outbox: LS.get('outbox', []), sync: 'ok', cargando: false
   };
   function hoy() { var d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
   function nuevoId(p) { return p + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
@@ -177,6 +177,88 @@
     return ciclo.pago ? 'Del ' + C.diaMes(ciclo.desde) + ' al ' + C.diaMes(ciclo.hasta) + ' · pagas el ' + C.diaMes(ciclo.pago) : 'Mes calendario (sin día de corte)';
   }
 
+  /* ---------- Fechas en formato dd/mm/aaaa y calendario propio ---------- */
+  function isoADmy(iso) { return /^\d{4}-\d{2}-\d{2}$/.test(iso || '') ? iso.slice(8, 10) + '/' + iso.slice(5, 7) + '/' + iso.slice(0, 4) : (iso || ''); }
+  function dmyAIso(t) {
+    var m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(t || '').trim()); if (!m) return null;
+    var iso = m[3] + '-' + pad(+m[2]) + '-' + pad(+m[1]);
+    return C.fechaValida(iso) ? iso : null;
+  }
+  // Devuelve AAAA-MM-DD; '' si está vacío (se usa hoy); 'invalida' si no se entiende (la validación avisa).
+  function leerFecha(el) { var v = (el.value || '').trim(); if (!v) return ''; return dmyAIso(v) || 'invalida'; }
+  var ICONO_CAL = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></svg>';
+  function campoFecha(id, valor, etiqueta) {
+    return '<label class="campo"><span>' + esc(etiqueta || 'Fecha') + '</span><span class="fecha-campo">' +
+      '<input id="' + id + '" class="fecha-txt" inputmode="numeric" autocomplete="off" placeholder="dd/mm/aaaa" maxlength="10" value="' + esc(isoADmy(valor)) + '">' +
+      '<button type="button" class="fecha-btn" data-calendario="' + id + '" aria-label="Elegir en el calendario">' + ICONO_CAL + '</button></span></label>';
+  }
+  // Al escribir, pone las diagonales solas: 01102026 → 01/10/2026.
+  document.addEventListener('input', function (e) {
+    var el = e.target; if (!el.classList || !el.classList.contains('fecha-txt')) return;
+    var d = el.value.replace(/\D/g, '').slice(0, 8);
+    el.value = d.length > 4 ? d.slice(0, 2) + '/' + d.slice(2, 4) + '/' + d.slice(4) : (d.length > 2 ? d.slice(0, 2) + '/' + d.slice(2) : d);
+  }, true);
+
+  var MESES_CORTOS = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+  var cal = { el: null, velo: null, ver: null, sel: null, modo: 'dias', alElegir: null };
+  function abrirCalendario(iso, alElegir) {
+    if (!cal.el) {
+      cal.velo = document.createElement('div'); cal.velo.className = 'cal-velo'; cal.velo.hidden = true;
+      cal.el = document.createElement('div'); cal.el.className = 'cal'; cal.el.hidden = true;
+      cal.el.setAttribute('role', 'dialog'); cal.el.setAttribute('aria-label', 'Calendario');
+      document.body.appendChild(cal.velo); document.body.appendChild(cal.el);
+      cal.velo.addEventListener('click', cerrarCalendario);
+      cal.el.addEventListener('click', function (e) {
+        var b = e.target.closest('button'); if (!b) return;
+        if (b.dataset.calMes) { cal.ver = C.sumarMeses(cal.ver, cal.modo === 'meses' ? 12 * +b.dataset.calMes : +b.dataset.calMes); pintarCalendario(); }
+        else if (b.dataset.calModo !== undefined) { cal.modo = cal.modo === 'dias' ? 'meses' : 'dias'; pintarCalendario(); }
+        else if (b.dataset.calElegirMes) { cal.ver = b.dataset.calElegirMes; cal.modo = 'dias'; pintarCalendario(); }
+        else if (b.dataset.dia) elegir(b.dataset.dia);
+        else if (b.dataset.calRapido) elegir(b.dataset.calRapido === 'hoy' ? hoy() : C.sumarDias(hoy(), -1));
+        else if (b.dataset.calCerrar !== undefined) cerrarCalendario();
+      });
+    }
+    cal.sel = C.fechaValida(iso) ? iso : hoy(); cal.ver = C.mesDe(cal.sel); cal.modo = 'dias'; cal.alElegir = alElegir;
+    pintarCalendario();
+    cal.velo.hidden = false; cal.el.hidden = false;
+  }
+  function elegir(iso) { var f = cal.alElegir; cerrarCalendario(); if (f) f(iso); }
+  function cerrarCalendario() { if (cal.el) { cal.el.hidden = true; cal.velo.hidden = true; } }
+  function pintarCalendario() {
+    var ym = cal.ver, y = +ym.slice(0, 4), m = +ym.slice(5, 7), h = hoy(), cuerpo;
+    var titulo = cal.modo === 'dias' ? C.nombreMes(ym) : String(y);
+    if (cal.modo === 'dias') {
+      var primero = new Date(Date.UTC(y, m - 1, 1)).getUTCDay(); // 0 = domingo
+      var vacios = (primero + 6) % 7, dias = C.diasDelMes(y, m), celdas = '';
+      for (var i = 0; i < vacios; i++) celdas += '<span></span>';
+      for (var dd = 1; dd <= dias; dd++) {
+        var iso = ym + '-' + pad(dd);
+        celdas += '<button type="button" class="cal-dia' + (iso === h ? ' hoy' : '') + (iso === cal.sel ? ' sel' : '') + '" data-dia="' + iso + '" aria-label="' + C.fechaCorta(iso) + '"' + (iso === cal.sel ? ' aria-pressed="true"' : '') + '>' + dd + '</button>';
+      }
+      cuerpo = '<div class="cal-semana"><span>L</span><span>M</span><span>M</span><span>J</span><span>V</span><span>S</span><span>D</span></div><div class="cal-grid">' + celdas + '</div>';
+    } else {
+      cuerpo = '<div class="cal-meses">' + MESES_CORTOS.map(function (n, i) {
+        var v = y + '-' + pad(i + 1);
+        return '<button type="button" class="cal-mes' + (v === C.mesDe(cal.sel) ? ' sel' : '') + (v === C.mesDe(h) ? ' hoy' : '') + '" data-cal-elegir-mes="' + v + '">' + n + '</button>';
+      }).join('') + '</div>';
+    }
+    cal.el.innerHTML = '<div class="cal-cab"><button type="button" class="cal-nav" data-cal-mes="-1" aria-label="Anterior">‹</button>' +
+      '<button type="button" class="cal-titulo" data-cal-modo aria-label="Cambiar mes o año">' + titulo + '</button>' +
+      '<button type="button" class="cal-nav" data-cal-mes="1" aria-label="Siguiente">›</button></div>' + cuerpo +
+      '<div class="cal-pie"><button type="button" class="btn btn-chico" data-cal-rapido="hoy">Hoy</button><button type="button" class="btn btn-chico" data-cal-rapido="ayer">Ayer</button>' +
+      '<button type="button" class="btn btn-chico btn-texto" data-cal-cerrar>Cancelar</button></div>';
+  }
+  // Botón de calendario junto a cada campo de fecha.
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-calendario]'); if (!b) return;
+    e.preventDefault();
+    var input = document.getElementById(b.dataset.calendario);
+    abrirCalendario(dmyAIso(input.value), function (iso) {
+      input.value = isoADmy(iso);
+      input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  });
+
   /* ---------- Reparto (gastos y cuotas) ---------- */
   function partesDe(r, total) {
     if (r.modo === 'mio') return { partes: [{ p: 'yo', m: total }] };
@@ -261,7 +343,6 @@
     if (!S.medio || !disp.some(function (m) { return m.id === S.medio; })) S.medio = C.ultimoMedio(d);
     $('#g-medio').innerHTML = disp.length ? opcionesMedio(S.medio) : '<option value="">Agrega una tarjeta en Bancos</option>';
     $('#g-medio-color').style.setProperty('--c', medioDe(S.medio).color);
-    $('#g-fecha').value = S.fecha || hoy();
     $('#g-fecha-txt').textContent = fechaTxt(S.fecha || hoy());
     $('#g-para-txt').textContent = textoPara(S.reparto);
     pista();
@@ -327,7 +408,7 @@
   function abrirGasto(id) {
     var g = C.buscar(S.data.gastos, id); if (!g) return;
     var d = S.data, enGasto = g.partes.map(function (x) { return x.p; });
-    var est = { monto: C.decimal(g.monto), nombre: g.nombre, fecha: g.fecha, medio: g.medio, cat: g.categoria, tipo: g.tipo, reparto: repartoDesdePartes(g.partes, g.monto) };
+    var est = { monto: C.decimal(g.monto), nombre: g.nombre, fecha: isoADmy(g.fecha), medio: g.medio, cat: g.categoria, tipo: g.tipo, reparto: repartoDesdePartes(g.partes, g.monto) };
     var titulo = 'Editar gasto';
     function listaMedios() {
       var t = d.tarjetas.filter(function (x) { return C.activo(x) || x.id === g.medio; }), c = d.cuentas.filter(function (x) { return C.activo(x) || x.id === g.medio; });
@@ -337,7 +418,7 @@
     function html() {
       return '<form class="form" id="f-eg" novalidate>' +
         '<div class="dos"><label class="campo"><span>Monto</span><input id="eg-m" inputmode="decimal" value="' + esc(est.monto) + '"></label>' +
-        '<label class="campo"><span>Fecha</span><input id="eg-f" type="date" value="' + esc(est.fecha) + '"></label></div>' +
+        campoFecha('eg-f', est.fecha) + '</div>' +
         '<label class="campo"><span>¿En qué fue?</span><input id="eg-n" value="' + esc(est.nombre) + '"></label>' +
         '<label class="campo"><span>Tarjeta o cuenta</span><select id="eg-medio">' + listaMedios() + '</select></label>' +
         '<button type="button" class="opcion" id="eg-para"><span class="opcion-lbl">Para</span><span>' + esc(textoPara(est.reparto)) + '</span></button>' +
@@ -366,7 +447,7 @@
           leer(root);
           abrirReparto({ estado: est.reparto, total: function () { return C.parseMonto(est.monto); },
             personas: function () {
-              var lista = C.personasDelMes(d, C.mesContable(d, est.medio, est.fecha));
+              var lista = C.personasDelMes(d, C.mesContable(d, est.medio, dmyAIso(est.fecha) || g.fecha));
               return lista.concat(d.personas.filter(function (p) { return enGasto.indexOf(p.id) >= 0 && lista.indexOf(p) < 0; }));
             },
             alCerrar: function () { setTimeout(function () { abrirHoja(titulo, html(), montar); }, 0); } });
@@ -376,7 +457,7 @@
         e.preventDefault(); leer(root);
         var total = C.parseMonto(est.monto), partes;
         if (total !== null && total > 0) { var pr = partesDe(est.reparto, total); if (pr.error) return errorEn(root, '#eg-err', pr.error); partes = pr.partes; }
-        var r = ejecutar({ tipo: 'editarGasto', id: g.id, nombre: est.nombre, monto: est.monto, fecha: est.fecha, medio: est.medio, categoria: est.cat, tipoGasto: est.tipo, partes: partes });
+        var r = ejecutar({ tipo: 'editarGasto', id: g.id, nombre: est.nombre, monto: est.monto, fecha: leerFecha($('#eg-f', root)), medio: est.medio, categoria: est.cat, tipoGasto: est.tipo, partes: partes });
         if (!r.ok) return errorEn(root, '#eg-err', r.error);
         cerrarHoja(); aviso('Gasto actualizado');
         if ($('#g-resultado [data-gasto="' + g.id + '"]')) mostrarResultado(C.buscar(S.data.gastos, g.id));
@@ -526,12 +607,15 @@
       return '<button type="button" class="alerta' + (r.dias <= 1 ? ' pasado' : '') + '" data-pagar="' + esc(r.tarjeta) + '">' + esc(C.textoRecordatorio(r)) + '</button>';
     }).join('') + '</div>' : '';
     var deudas = tarjetas.map(function (t) { return C.estadoTarjeta(d, t.id, h); });
-    html += '<div><div class="cab-bloque"><h2 class="titulo-bloque">Tarjetas</h2><span class="sub num">Debes ' + Q(deudas.reduce(function (a, e) { return a + Math.max(0, e.deuda); }, 0)) + '</span></div>' +
+    html += '<div><div class="cab-bloque"><h2 class="titulo-bloque">Tarjetas</h2><span class="sub num">Por pagar ' + Q(deudas.reduce(function (a, e) { return a + e.porPagar; }, 0)) + '</span></div>' +
+      '<p class="nota">Solo lo de este mes: compras del ciclo y la cuota de este mes de cada compra en cuotas. Lo que falta de las cuotas está en Cuotas.</p>' +
       (tarjetas.length ? tarjetas.map(function (t, i) {
-        var e = deudas[i];
+        var e = deudas[i], c = e.ciclo;
+        var meta = (c.ciclo.pago ? 'Pagas el ' + C.diaMes(c.ciclo.pago) : 'Falta día de corte') + ' · compras ' + Q(c.compras) + ' · cuotas ' + Q(c.cuotas) +
+          (c.pagado ? ' · pagado ' + Q(c.pagado) : '') + (e.anteriores ? ' · atrasado ' + Q(e.anteriores) : '');
+        var valor = e.porPagar > 0 ? Q(e.porPagar) + '<small>por pagar</small>' : (e.aFavor > 0 ? Q(e.aFavor) + '<small>a tu favor</small>' : Q(0) + '<small>' + (c.total ? 'pagado' : 'por pagar') + '</small>');
         return '<button type="button" class="banco" data-tarjeta="' + esc(t.id) + '">' + muestra(t.color, true) + '<span class="item-txt"><span class="item-nombre">' + esc(t.nombre) + '</span>' +
-          '<span class="item-meta">' + (e.conCorte ? 'Corte ' + t.corte + ' · pago ' + t.pago : 'Falta día de corte') + (e.conCorte && e.contado ? ' · contado ' + Q(e.contado) : '') + '</span></span>' +
-          '<span class="banco-valor num">' + Q(Math.abs(e.deuda)) + '<small>' + (e.deuda < 0 ? 'a tu favor' : 'deuda') + '</small></span></button>';
+          '<span class="item-meta envuelve">' + esc(meta) + '</span></span><span class="banco-valor num">' + valor + '</span></button>';
       }).join('') : '<p class="vacio">Todavía no tienes tarjetas. Agrega la primera.</p>') +
       '<div class="fila-btns"><button type="button" class="btn" id="b-pagar"' + (tarjetas.length ? '' : ' disabled') + '>Pagar tarjeta</button><button type="button" class="btn" id="b-nueva-t">Agregar tarjeta</button></div></div>';
     var saldos = cuentas.map(function (c) { return C.saldoCuenta(d, c.id); });
@@ -549,23 +633,27 @@
   }
 
   function infoContado(e) {
-    if (!e.conCorte) return 'Esta tarjeta no tiene día de corte. Agrégalo en Editar para calcular el pago de contado.';
-    if (e.contado > 0) return 'Pago de contado del corte del ' + C.diaMes(e.ultimoCorte) + ': ' + Q(e.contado) + '. Vence el ' + C.diaMes(e.pagoUltimo) + '.';
-    return 'Ya cubriste el corte del ' + C.diaMes(e.ultimoCorte) + '. El próximo corte es el ' + C.diaMes(e.siguienteCorte) + ' y llevas ' + Q(e.contadoSiguiente) + '.';
+    var c = e.ciclo, cic = c.ciclo;
+    var t = (cic.pago ? 'Ciclo del ' + C.diaMes(cic.desde) + ' al ' + C.diaMes(cic.hasta) + ', pagas el ' + C.diaMes(cic.pago) : 'Mes calendario (la tarjeta no tiene día de corte)') +
+      ': compras ' + Q(c.compras) + ' + cuotas del mes ' + Q(c.cuotas) + ' = ' + Q(c.total) + '.';
+    if (c.pagado) t += ' Ya pagaste ' + Q(c.pagado) + '.';
+    if (e.anteriores) t += ' De ciclos anteriores quedan ' + Q(e.anteriores) + '.';
+    t += e.porPagar > 0 ? ' Pago de contado: ' + Q(e.porPagar) + '.' : ' No tienes nada pendiente este mes.';
+    return t;
   }
   function abrirPago(tid, editId) {
     var d = S.data, h = hoy(), pg = editId ? C.buscar(d.pagos, editId) : null;
     if (pg) tid = pg.tarjeta;
     var tarjetas = d.tarjetas.filter(function (t) { return C.activo(t) || C.deudaTarjeta(d, t.id, h) > 0 || t.id === tid; });
-    if (!tid) { var rec = C.recordatorios(d, h)[0]; tid = rec ? rec.tarjeta : ((tarjetas.filter(function (t) { return C.estadoTarjeta(d, t.id, h).contado > 0; })[0] || tarjetas[0] || {}).id); }
+    if (!tid) { var rec = C.recordatorios(d, h)[0]; tid = rec ? rec.tarjeta : ((tarjetas.filter(function (t) { return C.estadoTarjeta(d, t.id, h).porPagar > 0; })[0] || tarjetas[0] || {}).id); }
     var cuentas = d.cuentas.filter(function (c) { return C.activo(c) || (pg && c.id === pg.cuenta); });
     var html = '<form class="form" id="f-pago" novalidate>' +
       '<label class="campo"><span>Tarjeta</span><select id="pg-t">' + opciones(tarjetas, tid, function (t) { return t.nombre; }) + '</select></label>' +
       '<p class="alerta suave" id="pg-info"></p>' +
       '<label class="campo"><span>Desde la cuenta</span><select id="pg-c">' + opciones(cuentas, pg ? pg.cuenta : null, function (c) { return c.nombre + ' · ' + Q(C.saldoCuenta(d, c.id)); }) + '</select></label>' +
       '<div class="dos"><label class="campo"><span>Monto</span><input id="pg-m" inputmode="decimal" placeholder="0.00"' + (pg ? ' value="' + C.decimal(pg.monto) + '"' : '') + '></label>' +
-      '<label class="campo"><span>Fecha</span><input id="pg-f" type="date" value="' + (pg ? pg.fecha : h) + '"></label></div>' +
-      '<div class="fila-btns"><button type="button" class="btn btn-chico" id="pg-contado"></button><button type="button" class="btn btn-chico" id="pg-todo"></button></div>' +
+      campoFecha('pg-f', pg ? pg.fecha : h) + '</div>' +
+      '<div class="fila-btns"><button type="button" class="btn btn-chico" id="pg-contado"></button></div>' +
       '<p class="nota">El pago baja la deuda de la tarjeta y el saldo de la cuenta por el mismo monto. No cuenta como gasto.</p>' +
       '<p class="error" id="pg-err" hidden></p><button class="btn btn-principal" type="submit">' + (pg ? 'Guardar cambios' : 'Registrar pago') + '</button>' +
       (pg ? '<button class="btn btn-peligro" type="button" id="pg-borrar">Borrar pago</button>' : '') + '</form>';
@@ -573,20 +661,17 @@
       var primera = true;
       function actualizar() {
         var e = C.estadoTarjeta(d, $('#pg-t', root).value, h);
-        if (pg && pg.tarjeta === $('#pg-t', root).value) e.deuda += pg.monto; // el pago que editas no cuenta
-        var contado = Math.min(e.conCorte ? (e.contado || e.contadoSiguiente) : e.deuda, e.deuda);
+        var contado = e.porPagar + (pg && pg.tarjeta === $('#pg-t', root).value ? pg.monto : 0); // el pago que editas no cuenta
         $('#pg-info', root).textContent = infoContado(e);
         if (!(pg && primera)) $('#pg-m', root).value = contado > 0 ? C.decimal(contado) : '';
         primera = false;
-        $('#pg-contado', root).textContent = 'Contado ' + Q(contado);
-        $('#pg-todo', root).textContent = 'Todo lo que debes ' + Q(e.deuda);
+        $('#pg-contado', root).textContent = 'Contado del mes ' + Q(contado);
         $('#pg-contado', root).onclick = function () { $('#pg-m', root).value = C.decimal(contado); };
-        $('#pg-todo', root).onclick = function () { $('#pg-m', root).value = C.decimal(e.deuda); };
       }
       actualizar(); $('#pg-t', root).addEventListener('change', actualizar);
       $('#f-pago', root).addEventListener('submit', function (e) {
         e.preventDefault();
-        var a = { tipo: pg ? 'editarPago' : 'pagarTarjeta', tarjeta: $('#pg-t', root).value, cuenta: $('#pg-c', root).value, monto: $('#pg-m', root).value, fecha: $('#pg-f', root).value };
+        var a = { tipo: pg ? 'editarPago' : 'pagarTarjeta', tarjeta: $('#pg-t', root).value, cuenta: $('#pg-c', root).value, monto: $('#pg-m', root).value, fecha: leerFecha($('#pg-f', root)) };
         if (pg) a.id = pg.id;
         var r = ejecutar(a);
         if (!r.ok) return errorEn(root, '#pg-err', r.error);
@@ -605,14 +690,14 @@
       '<label class="campo"><span>Cuenta</span><select id="mv-c">' + opciones(cuentas, cid, function (c) { return c.nombre + ' · ' + Q(C.saldoCuenta(d, c.id)); }) + '</select></label>' +
       '<label class="campo"><span>Descripción</span><input id="mv-d" value="' + esc(mv ? mv.descripcion : '') + '" placeholder="' + (esR ? 'Cajero, efectivo…' : 'Salario, bono 14, venta…') + '"></label>' +
       '<div class="dos"><label class="campo"><span>Monto</span><input id="mv-m" inputmode="decimal" placeholder="0.00" value="' + (mv ? C.decimal(mv.monto) : '') + '"></label>' +
-      '<label class="campo"><span>Fecha</span><input id="mv-f" type="date" value="' + (mv ? mv.fecha : hoy()) + '"></label></div>' +
+      campoFecha('mv-f', mv ? mv.fecha : hoy()) + '</div>' +
       (esR ? '<p class="nota">Un retiro baja el saldo de la cuenta y puede dejarla en negativo. No cuenta como gasto: anota aparte en qué usas el efectivo.</p>' : '') +
       '<p class="error" id="mv-err" hidden></p><button class="btn btn-principal" type="submit">' + (mv ? 'Guardar cambios' : 'Registrar ' + (esR ? 'retiro' : 'ingreso')) + '</button>' +
       (mv ? '<button class="btn btn-peligro" type="button" id="mv-borrar">Borrar ' + (esR ? 'retiro' : 'ingreso') + '</button>' : '') + '</form>';
     abrirHoja((mv ? 'Editar ' : 'Registrar ') + (esR ? 'retiro' : 'ingreso'), html, function (root) {
       $('#f-mov', root).addEventListener('submit', function (e) {
         e.preventDefault();
-        var a = { tipo: (mv ? 'editar' : 'agregar') + (esR ? 'Retiro' : 'Ingreso'), cuenta: $('#mv-c', root).value, descripcion: $('#mv-d', root).value, monto: $('#mv-m', root).value, fecha: $('#mv-f', root).value };
+        var a = { tipo: (mv ? 'editar' : 'agregar') + (esR ? 'Retiro' : 'Ingreso'), cuenta: $('#mv-c', root).value, descripcion: $('#mv-d', root).value, monto: $('#mv-m', root).value, fecha: leerFecha($('#mv-f', root)) };
         if (mv) a.id = mv.id;
         var r = ejecutar(a);
         if (!r.ok) return errorEn(root, '#mv-err', r.error);
@@ -634,7 +719,7 @@
       '<label class="campo"><span>Hacia</span><select id="tr-d">' + opciones(cuentas, de, etiqueta) + '</select></label>' +
       '<label class="campo"><span>Descripción</span><input id="tr-n" value="' + esc(tr ? tr.descripcion : '') + '" placeholder="Ej.: Ahorro del mes"></label>' +
       '<div class="dos"><label class="campo"><span>Monto</span><input id="tr-m" inputmode="decimal" placeholder="0.00" value="' + (tr ? C.decimal(tr.monto) : '') + '"></label>' +
-      '<label class="campo"><span>Fecha</span><input id="tr-f" type="date" value="' + (tr ? tr.fecha : hoy()) + '"></label></div>' +
+      campoFecha('tr-f', tr ? tr.fecha : hoy()) + '</div>' +
       '<p class="nota">Baja el saldo de una cuenta y sube el de la otra por el mismo monto. No cuenta como gasto ni como ingreso. La cuenta de origen puede quedar en negativo.</p>' +
       '<p class="error" id="tr-err" hidden></p><button class="btn btn-principal" type="submit">' + (tr ? 'Guardar cambios' : 'Transferir') + '</button>' +
       (tr ? '<button class="btn btn-peligro" type="button" id="tr-borrar">Borrar transferencia</button>' : '') + '</form>';
@@ -642,7 +727,7 @@
       $('#f-tr', root).addEventListener('submit', function (e) {
         e.preventDefault();
         var a = { tipo: tr ? 'editarTransferencia' : 'agregarTransferencia', origen: $('#tr-o', root).value, destino: $('#tr-d', root).value,
-          descripcion: $('#tr-n', root).value, monto: $('#tr-m', root).value, fecha: $('#tr-f', root).value };
+          descripcion: $('#tr-n', root).value, monto: $('#tr-m', root).value, fecha: leerFecha($('#tr-f', root)) };
         if (tr) a.id = tr.id;
         var r = ejecutar(a);
         if (!r.ok) return errorEn(root, '#tr-err', r.error);
@@ -657,12 +742,21 @@
     var prox = [];
     d.cuotas.forEach(function (c) { if (c.tarjeta === id) { var x = C.estadoCuota(c, h); if (x.proxima) prox.push(x.proxima); } });
     prox.sort(function (a, b) { return a.fecha.localeCompare(b.fecha); });
-    var html = '<div class="cifra"><span class="eyebrow">' + (e.deuda < 0 ? 'Saldo a tu favor' : 'Deuda actual') + (t.banco ? ' · ' + esc(t.banco) : '') + '</span><span class="cifra-valor num">' + Q(Math.abs(e.deuda)) + '</span>' +
+    var c = e.ciclo;
+    var html = '<div class="cifra"><span class="eyebrow">' + (e.porPagar > 0 ? 'Por pagar este mes' : (e.aFavor > 0 ? 'Saldo a tu favor' : 'Este mes')) + (t.banco ? ' · ' + esc(t.banco) : '') + '</span>' +
+      '<span class="cifra-valor num">' + Q(e.porPagar > 0 ? e.porPagar : e.aFavor) + '</span>' +
       '<span class="sub">' + (e.conCorte ? 'Corte el ' + t.corte + ' · pago el ' + t.pago + ' de cada mes' : 'Sin día de corte') + '</span></div>' +
-      '<p class="alerta suave">' + esc(infoContado(e)) + '</p>' +
-      '<div><span class="eyebrow">Próximas cuotas</span><ul class="lista">' + (prox.length ? prox.map(function (x) {
-        return '<li class="item"><span></span><span class="item-txt"><span class="item-nombre">' + esc(x.nombre) + '<span class="insignia">' + x.n + '/' + x.de + '</span></span><span class="item-meta">' + esc(C.fechaCorta(x.fecha)) + '</span></span><span class="item-monto num">' + Q(x.monto) + '</span></li>';
-      }).join('') : '<li class="vacio">Sin cuotas pendientes en esta tarjeta.</li>') + '</ul></div>' +
+      '<table class="tabla"><tbody>' +
+      '<tr><td>Compras del ciclo</td><td class="num">' + Q(c.compras) + '</td></tr>' +
+      '<tr><td>Cuotas de este mes</td><td class="num">' + Q(c.cuotas) + '</td></tr>' +
+      (c.pagado ? '<tr><td>Pagado</td><td class="num">−' + Q(c.pagado) + '</td></tr>' : '') +
+      (e.anteriores ? '<tr><td>De ciclos anteriores</td><td class="num">' + Q(e.anteriores) + '</td></tr>' : '') +
+      '</tbody><tfoot><tr><td>Por pagar</td><td class="num">' + Q(e.porPagar) + '</td></tr></tfoot></table>' +
+      '<p class="nota">' + esc(c.ciclo.pago ? 'Ciclo del ' + C.diaMes(c.ciclo.desde) + ' al ' + C.diaMes(c.ciclo.hasta) + ' · pagas el ' + C.diaMes(c.ciclo.pago) + '.' : 'Agrega el día de corte en Editar para contar por ciclo.') + '</p>' +
+      '<div><span class="eyebrow">Próxima cuota de cada compra</span><ul class="lista">' + (prox.length ? prox.map(function (x) {
+        return '<li><button type="button" class="item" data-cuota="' + esc(x.cuotaId) + '"><span></span><span class="item-txt"><span class="item-nombre">' + esc(x.nombre) + '<span class="insignia">' + x.n + '/' + x.de + '</span></span><span class="item-meta">' + esc(C.fechaCorta(x.fecha)) + '</span></span><span class="item-monto num">' + Q(x.monto) + '</span></button></li>';
+      }).join('') : '<li class="vacio">Sin cuotas pendientes en esta tarjeta.</li>') + '</ul>' +
+      (prox.length ? '<button type="button" class="btn btn-texto" id="t-cuotas">Ver las cuotas de esta tarjeta</button>' : '') + '</div>' +
       (function () {
         var pagos = movimientosBanco(function (tb, x) { return tb === 'pagos' && x.tarjeta === id; }).slice(0, 10);
         return pagos.length ? '<div><span class="eyebrow">Pagos</span><ul class="lista">' + pagos.map(function (m) { return itemMov(m.t, m.x); }).join('') + '</ul></div>' : '';
@@ -671,6 +765,7 @@
     abrirHoja(t.nombre, html, function (root) {
       clicsLista(root);
       $('#t-pagar', root).addEventListener('click', function () { abrirPago(id); });
+      var vc = $('#t-cuotas', root); if (vc) vc.addEventListener('click', function () { S.filtroCuotas = id; cerrarHoja(); irA('cuotas'); });
       $('#t-editar', root).addEventListener('click', function () { abrirBanco('tarjetas', id); });
     });
   }
@@ -732,20 +827,42 @@
   function renderCuotas() {
     var d = S.data, h = hoy();
     var lista = d.cuotas.map(function (c) { return { c: c, e: C.estadoCuota(c, h) }; }).sort(function (a, b) { return a.e.final.localeCompare(b.e.final); });
-    var activas = lista.filter(function (x) { return x.e.cargadas < x.c.numCuotas; }), fin = lista.filter(function (x) { return x.e.cargadas >= x.c.numCuotas; });
+    // Solo aparecen las tarjetas que tienen cuotas.
+    var conCuotas = d.tarjetas.filter(function (t) { return lista.some(function (x) { return x.c.tarjeta === t.id; }); });
+    if (S.filtroCuotas !== 'todas' && !conCuotas.some(function (t) { return t.id === S.filtroCuotas; })) S.filtroCuotas = 'todas';
+    var visibles = lista.filter(function (x) { return S.filtroCuotas === 'todas' || x.c.tarjeta === S.filtroCuotas; });
+    var activas = visibles.filter(function (x) { return x.e.cargadas < x.c.numCuotas; }), fin = visibles.filter(function (x) { return x.e.cargadas >= x.c.numCuotas; });
+    var restante = function (x) { return x.e.calendario.reduce(function (a, q) { return a + (q.fecha > h ? q.monto : 0); }, 0); };
     var mensual = activas.reduce(function (a, x) { return a + (x.e.proxima ? x.e.proxima.monto : 0); }, 0);
     var mio = activas.reduce(function (a, x) { return a + (x.e.proxima ? C.sumaPartes(x.e.proxima.partes, 'yo') : 0); }, 0);
+    var falta = activas.reduce(function (a, x) { return a + restante(x); }, 0);
     function fila(x) {
-      var c = x.c, m = medioDe(c.tarjeta), partes = C.partesCuota(c);
-      return '<li><button type="button" class="item" data-cuota="' + esc(c.id) + '">' + muestra(m.color) +
+      var c = x.c, partes = C.partesCuota(c), r = restante(x);
+      return '<li><button type="button" class="item" data-cuota="' + esc(c.id) + '"><span></span>' +
         '<span class="item-txt"><span class="item-nombre">' + esc(c.nombre) + '<span class="insignia">' + x.e.cargadas + '/' + c.numCuotas + '</span></span>' +
-        '<span class="item-meta">' + esc(C.describirDueno(d, partes)) + ' · termina ' + esc(C.fechaCorta(x.e.final)) + '</span></span>' +
+        '<span class="item-meta envuelve">' + esc(C.describirDueno(d, partes)) + ' · termina ' + esc(C.fechaCorta(x.e.final)) + (r ? ' · faltan ' + Q(r) : '') + '</span></span>' +
         '<span class="item-monto num">' + Q(x.e.montoCuota) + '<small>al mes</small></span></button></li>';
     }
-    $('#cuotas-cuerpo').innerHTML = (activas.length ? '<div class="cifra"><span class="eyebrow">Próximas cuotas</span><span class="cifra-valor num">' + Q(mensual) + '</span><span class="sub">Tuyo ' + Q(mio) + ' · de otros ' + Q(mensual - mio) + '</span></div>' : '') +
+    function porTarjeta(items, titulo) {
+      if (!items.length) return '';
+      return '<div><h2 class="titulo-bloque">' + titulo + '</h2>' + conCuotas.map(function (t) {
+        var suyas = items.filter(function (x) { return x.c.tarjeta === t.id; }); if (!suyas.length) return '';
+        var mes = suyas.reduce(function (a, x) { return a + (x.e.proxima ? x.e.proxima.monto : 0); }, 0);
+        return '<div class="grupo-tarjeta"><div class="grupo-cab">' + muestra(t.color) + '<span class="grupo-nombre">' + esc(t.nombre) + '</span>' +
+          (mes ? '<span class="sub num">' + Q(mes) + ' al mes</span>' : '') + '</div><ul class="lista">' + suyas.map(fila).join('') + '</ul></div>';
+      }).join('') + '</div>';
+    }
+    var chips = conCuotas.length ? '<div class="chips" id="cu-filtro" role="radiogroup" aria-label="Filtrar por tarjeta">' +
+      '<button type="button" class="chip" role="radio" data-filtro="todas" aria-checked="' + (S.filtroCuotas === 'todas') + '">Todas</button>' +
+      conCuotas.map(function (t) { return '<button type="button" class="chip" role="radio" data-filtro="' + esc(t.id) + '" aria-checked="' + (S.filtroCuotas === t.id) + '">' + muestra(t.color) + esc(t.nombre) + '</button>'; }).join('') + '</div>' : '';
+    $('#cuotas-cuerpo').innerHTML = (activas.length ? '<div class="cifra"><span class="eyebrow">Próximas cuotas' + (S.filtroCuotas !== 'todas' ? ' · ' + esc(medioDe(S.filtroCuotas).nombre) : '') + '</span><span class="cifra-valor num">' + Q(mensual) + '</span>' +
+        '<span class="sub">Tuyo ' + Q(mio) + ' · de otros ' + Q(mensual - mio) + ' · faltan ' + Q(falta) + ' en total</span></div>' : '') +
+      chips +
       '<button type="button" class="btn btn-principal" id="cu-nueva">Nueva compra en cuotas</button>' +
-      '<div><h2 class="titulo-bloque">Activas</h2><ul class="lista">' + (activas.length ? activas.map(fila).join('') : '<li class="vacio">No hay cuotas activas.</li>') + '</ul></div>' +
-      (fin.length ? '<div><h2 class="titulo-bloque">Terminadas</h2><ul class="lista">' + fin.map(fila).join('') + '</ul></div>' : '');
+      (activas.length ? porTarjeta(activas, 'Activas') : '<div><h2 class="titulo-bloque">Activas</h2><p class="vacio">No hay cuotas activas.</p></div>') +
+      porTarjeta(fin, 'Terminadas');
+    var f = $('#cu-filtro');
+    if (f) f.addEventListener('click', function (e) { var b = e.target.closest('[data-filtro]'); if (b) { S.filtroCuotas = b.dataset.filtro; renderCuotas(); } });
   }
   // Sin id: compra nueva. Con id: edita todo de una compra en cuotas existente.
   function repartoDesdePartes(partes, total) {
@@ -771,19 +888,19 @@
       '<label class="campo"><span>¿Qué compraste?</span><input id="cu-n" placeholder="Ej.: Intelaf El Naranjo"></label>' +
       '<div class="dos"><label class="campo"><span>Monto total</span><input id="cu-t" inputmode="decimal" placeholder="0.00"></label>' +
       '<label class="campo"><span>Número de cuotas</span><input id="cu-k" inputmode="numeric" placeholder="12"></label></div>' +
-      '<div class="dos"><label class="campo"><span>Primera cuota</span><input id="cu-f" type="date" value="' + hoy() + '"></label>' +
+      '<div class="dos">' + campoFecha('cu-f', hoy(), 'Primera cuota') +
       '<label class="campo"><span>Tarjeta</span><select id="cu-tc">' + opciones(tarjetas, C.medio(d, S.medio) && C.medio(d, S.medio).tipo === 'tarjeta' ? S.medio : null, function (t) { return t.nombre; }) + '</select></label></div>' +
       '<label class="campo"><span>Categoría</span><select id="cu-cat">' + C.CATEGORIAS.map(function (c) { return '<option' + (c === 'Deudas y tarjetas' ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('') + '</select></label>' +
       '<button type="button" class="opcion" id="cu-para"><span class="opcion-lbl">Para</span><span id="cu-para-txt">Solo mío</span></button>' +
       '<p class="nota" id="cu-prev">Escribe el monto y el número de cuotas para ver el calendario.</p>' +
       (c ? '<p class="nota">Al guardar se recalcula todo el calendario con los datos nuevos: montos, fechas, tarjeta y lo que le toca a cada persona.</p>' : '') +
       '<p class="error" id="cu-err" hidden></p><button class="btn btn-principal" type="submit">' + (c ? 'Guardar cambios' : 'Guardar cuotas') + '</button></form>';
-    var guardado = c ? { 'cu-n': c.nombre, 'cu-t': C.decimal(c.total), 'cu-k': String(c.numCuotas), 'cu-f': c.fechaInicio, 'cu-tc': c.tarjeta, 'cu-cat': c.categoria } : null;
+    var guardado = c ? { 'cu-n': c.nombre, 'cu-t': C.decimal(c.total), 'cu-k': String(c.numCuotas), 'cu-f': isoADmy(c.fechaInicio), 'cu-tc': c.tarjeta, 'cu-cat': c.categoria } : null;
     function montar(root) {
       if (guardado) Object.keys(guardado).forEach(function (k) { $('#' + k, root).value = guardado[k]; });
       $('#cu-para-txt', root).textContent = textoPara(reparto);
       function prev() {
-        var t = C.parseMonto($('#cu-t', root).value), k = parseInt($('#cu-k', root).value, 10), f = $('#cu-f', root).value;
+        var t = C.parseMonto($('#cu-t', root).value), k = parseInt($('#cu-k', root).value, 10), f = leerFecha($('#cu-f', root));
         if (!(t > 0 && k >= 1 && k <= 120 && t >= k && C.fechaValida(f))) return;
         var pr = partesDe(reparto, t);
         var cal = C.calendarioCuota({ id: 'x', nombre: '', fechaInicio: f, total: t, numCuotas: k, partes: pr.partes || [{ p: 'yo', m: t }] });
@@ -805,7 +922,7 @@
         var t = C.parseMonto($('#cu-t', root).value), partes;
         if (t > 0) { var pr = partesDe(reparto, t); if (pr.error) return errorEn(root, '#cu-err', pr.error); partes = pr.partes; }
         var a = { tipo: c ? 'editarCuota' : 'agregarCuota', nombre: $('#cu-n', root).value, total: $('#cu-t', root).value, numCuotas: $('#cu-k', root).value,
-          fechaInicio: $('#cu-f', root).value, tarjeta: $('#cu-tc', root).value, categoria: $('#cu-cat', root).value, partes: partes };
+          fechaInicio: leerFecha($('#cu-f', root)), tarjeta: $('#cu-tc', root).value, categoria: $('#cu-cat', root).value, partes: partes };
         if (c) a.id = c.id;
         var r = ejecutar(a);
         if (!r.ok) return errorEn(root, '#cu-err', r.error);
@@ -842,7 +959,11 @@
     $('#personas-cuerpo').innerHTML = '<form class="form" id="f-persona" novalidate><h2 class="titulo-bloque">Agregar persona</h2>' +
       '<label class="campo"><span>Nombre</span><input id="pe-n" placeholder="Ej.: Esther"></label>' +
       '<div class="dos"><label class="campo"><span>Duración</span><select id="pe-t"><option value="permanente">Permanente</option><option value="mes">Solo un mes</option></select></label>' +
-      '<label class="campo"><span>Mes</span><input id="pe-m" type="month" value="' + ym + '" disabled></label></div>' +
+      '<label class="campo"><span>Mes</span><select id="pe-m" disabled>' + (function () {
+        var out = '', base = C.mesDe(hoy());
+        for (var k = -3; k <= 12; k++) { var v = C.sumarMeses(base, k); out += '<option value="' + v + '"' + (v === ym ? ' selected' : '') + '>' + C.nombreMes(v) + '</option>'; }
+        return out;
+      })() + '</select></label></div>' +
       '<p class="error" id="pe-err" hidden></p><button class="btn btn-principal" type="submit">Agregar persona</button></form>' +
       '<div><div class="cab-bloque"><h2 class="titulo-bloque">Tus personas</h2><span class="sub">' + esc(C.nombreMes(ym)) + '</span></div><ul class="lista">' + (lista.length ? lista.map(function (p) {
         var x = r.personas.filter(function (y) { return y.id === p.id; })[0];
@@ -933,9 +1054,11 @@
   $('#g-nombre').addEventListener('input', pista);
   $('#g-monto').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); $('#g-nombre').focus(); } });
   $('#g-medio').addEventListener('change', function () { S.medio = this.value; $('#g-medio-color').style.setProperty('--c', medioDe(S.medio).color); });
-  $('#g-fecha').addEventListener('change', function () {
-    S.fecha = this.value && this.value !== hoy() ? this.value : null;
-    $('#g-fecha-txt').textContent = fechaTxt(S.fecha || hoy());
+  $('#g-fecha-btn').addEventListener('click', function () {
+    abrirCalendario(S.fecha || hoy(), function (iso) {
+      S.fecha = iso !== hoy() ? iso : null;
+      $('#g-fecha-txt').textContent = fechaTxt(S.fecha || hoy());
+    });
   });
   $('#g-para').addEventListener('click', function () {
     abrirReparto({ estado: S.reparto, total: function () { return C.parseMonto($('#g-monto').value); },
